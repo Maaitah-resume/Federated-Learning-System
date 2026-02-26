@@ -1,0 +1,8 @@
+pandas 
+numpy
+fastapi
+uvicorn
+torch
+request
+aiohttp
+sklearn
