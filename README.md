@@ -872,19 +872,18 @@ setInterval(checkQueueThreshold, QUEUE_CHECK_INTERVAL_MS);
                     │ model available │
                     └─────────────────┘
 ```
+## 9.2 Weight Aggregation Strategy (Secure Masked Meta-Aggregation)
 
-### 9.2 Weight Aggregation Strategy (FedAvg)
+Instead of using the traditional **FedAvg weighted average**, this system adopts a **Secure Masked Meta-Aggregation** strategy. In this approach, each participating company first computes its local model update after training and then applies a privacy mask before sending the update to the server. The masks are constructed so they cancel out during aggregation, ensuring the server cannot inspect any individual client update.
 
-The FedAvg algorithm computes a weighted average of participant model updates, where each company's contribution is proportional to its local dataset size. This ensures companies with more training data have greater influence on the global model — consistent with standard federated learning theory.
+After the masks cancel, the server uses a lightweight **meta-aggregator** to combine participant updates. Unlike standard averaging, the meta-aggregator can learn better ways to combine updates from heterogeneous clients with different data distributions.
 
-```
-Global_Model = Σ (n_k / N) × Local_Model_k
+This improves both **privacy protection** and **model performance**, especially in environments where companies have different network traffic patterns and non-IID datasets.
 
-Where:
-  n_k = dataset size of company k
-  N   = total samples across all participants
-  Local_Model_k = model weights submitted by company k after local training
-```
+### Aggregation Formulation
+
+```math
+Masked\_Update_k = \Delta_k + M_k
 
 ### 9.3 Round Timeout & Recovery
 
