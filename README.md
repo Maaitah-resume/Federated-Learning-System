@@ -882,7 +882,6 @@ This improves both **privacy protection** and **model performance**, especially 
 
 ### Aggregation Formulation
 
-```math
 Masked\_Update_k = \Delta_k + M_k
 
 ### 9.3 Round Timeout & Recovery
