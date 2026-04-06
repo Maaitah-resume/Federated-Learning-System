@@ -1,0 +1,5 @@
+{
+  "name": "Federated Learning Dashboard",
+  "description": "A comprehensive dashboard for managing and monitoring distributed federated learning training processes.",
+  "requestFramePermissions": []
+}
