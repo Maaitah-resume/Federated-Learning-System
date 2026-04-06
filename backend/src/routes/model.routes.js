@@ -13,7 +13,7 @@ const router = express.Router();
 // Lists all AVAILABLE models for jobs the authenticated company participated in
 router.get('/', authenticate, async (req, res, next) => {
   try {
-    const { companyId } = req.company;
+    const { companyId } = req.company;      // Identifies who is making the request
 
     // Find all completed jobs where this company was a participant
     const completedJobs = await jobManager.getJobHistory();
