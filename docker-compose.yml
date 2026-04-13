@@ -1,0 +1,45 @@
+version: '3.8'
+
+services:
+  mongo:
+    image: mongo:6
+    container_name: fl_mongo
+    restart: unless-stopped
+    volumes:
+      - mongo_data:/data/db
+    ports:
+      - "27017:27017"
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: fl_backend
+    restart: unless-stopped
+    depends_on:
+      - mongo
+    environment:
+      - MONGODB_URI=mongodb://mongo:27017/fl_db
+      - NODE_ENV=development
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./backend:/app
+      - ./frontend/dist:/app/frontend/dist
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: fl_frontend
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=development
+      - PORT=3000
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+    command: ["npm", "run", "dev"]
+
+volumes:
+  mongo_data:
