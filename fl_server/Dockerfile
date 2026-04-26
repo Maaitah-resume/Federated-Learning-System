@@ -2,13 +2,13 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-COPY fl_server/requirements.txt ./
+COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY fl_server/api/ ./api/
-COPY fl_server/core/ ./core/
-COPY fl_server/models/ ./models/
-COPY fl_server/main.py ./
+COPY api/ ./api/
+COPY core/ ./core/
+COPY models/ ./models/
+COPY main.py ./
 
 RUN mkdir -p /tmp/models
 
