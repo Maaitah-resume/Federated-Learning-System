@@ -3,7 +3,7 @@ builder = "dockerfile"
 dockerfilePath = "fl_server/Dockerfile"
 
 [deploy]
-startCommand = "cd /app && pip install -r requirements.txt && uvicorn main:app --host 0.0.0.0 --port 8000"
+startCommand = "python -m uvicorn main:app --host 0.0.0.0 --port 8000"
 healthcheckPath = "/health"
-healthcheckTimeout = 60
+healthcheckTimeout = 100
 restartPolicyType = "on_failure"
