@@ -2,7 +2,7 @@
 const fs          = require('fs');
 const path        = require('path');
 const { v4: uuidv4 } = require('uuid');
-const ModelDoc    = require('../models/Model');
+const ModelDoc    = require('../models/Models');
 const TrainingJob = require('../models/TrainingJob');
 const { MODEL_STATUS } = require('../config/constants');
 const { MODEL_STORE_PATH } = require('../config/env');
