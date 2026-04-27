@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useNavigate } from 'react-router-dom';
 import { Lock, Building2, Mail, ArrowRight, ShieldCheck } from 'lucide-react';
@@ -7,14 +7,19 @@ import { motion } from 'motion/react';
 export default function Login() {
   const [email, setEmail] = useState('');
   const [company, setCompany] = useState('');
-  const { login } = useAuth();
+  const { login, isLoading, error } = useAuth();
   const navigate = useNavigate();
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (email && company) {
-      login(company, email);
-      navigate('/');
+      try {
+        // FIX: Swap parameters - company is username, email is password
+        await login(company, email);
+        navigate('/');
+      } catch (err) {
+        console.error('Login failed:', err);
+      }
     }
   };
 
@@ -40,6 +45,12 @@ export default function Login() {
             <p className="text-slate-400 mt-2 text-center">Access the Federated Learning Control Center</p>
           </div>
 
+          {error && (
+            <div className="mb-6 p-4 bg-red-500/10 border border-red-500/20 rounded-xl text-red-400 text-sm">
+              {error}
+            </div>
+          )}
+
           <form onSubmit={handleSubmit} className="space-y-6">
             <div className="space-y-2">
               <label className="text-xs font-bold text-slate-500 uppercase tracking-widest ml-1">Company Name</label>
@@ -52,6 +63,7 @@ export default function Login() {
                   value={company}
                   onChange={(e) => setCompany(e.target.value)}
                   required
+                  disabled={isLoading}
                 />
               </div>
             </div>
@@ -67,18 +79,24 @@ export default function Login() {
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   required
+                  disabled={isLoading}
                 />
               </div>
             </div>
 
             <button 
               type="submit"
-              className="w-full bg-indigo-600 hover:bg-indigo-500 text-white py-4 rounded-2xl font-bold text-lg transition-all flex items-center justify-center gap-2 group shadow-xl shadow-indigo-500/20"
+              disabled={isLoading}
+              className="w-full bg-indigo-600 hover:bg-indigo-500 disabled:bg-indigo-600/50 disabled:cursor-not-allowed text-white py-4 rounded-2xl font-bold text-lg transition-all flex items-center justify-center gap-2 group shadow-xl shadow-indigo-500/20"
             >
-              Sign In
-              <ArrowRight size={20} className="group-hover:translate-x-1 transition-transform" />
+              {isLoading ? 'Signing in...' : 'Sign In'}
+              {!isLoading && <ArrowRight size={20} className="group-hover:translate-x-1 transition-transform" />}
             </button>
           </form>
+
+          <div className="mt-6 text-center text-sm text-slate-500">
+            <p>Try company: <span className="text-indigo-400">alpha</span>, <span className="text-indigo-400">beta</span>, or <span className="text-indigo-400">gamma</span></p>
+          </div>
 
           <div className="mt-10 pt-8 border-t border-slate-800 flex justify-center gap-6">
             <div className="flex flex-col items-center">
