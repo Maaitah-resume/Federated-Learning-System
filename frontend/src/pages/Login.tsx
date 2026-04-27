@@ -13,7 +13,7 @@ export default function Login() {
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (email && company) {
-      login(email, company);
+      login(company, email);
       navigate('/');
     }
   };
