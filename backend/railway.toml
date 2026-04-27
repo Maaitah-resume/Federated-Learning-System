@@ -6,3 +6,4 @@ dockerfilePath = "Dockerfile"
 startCommand = "node server.js"
 healthcheckPath = "/health"
 healthcheckTimeout = 60
+restartPolicyType = "on_failure"
