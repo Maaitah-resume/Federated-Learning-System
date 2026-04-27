@@ -7,11 +7,29 @@ export function SocketProvider({ children }: { children: ReactNode }) {
   const [socket, setSocket] = useState<Socket | null>(null);
 
   useEffect(() => {
-    // In a real app, this would be your backend URL
-    // For now, we'll just mock the socket behavior in components if it's null
-    const newSocket = io('http://localhost:4000', {
-      autoConnect: false, // Don't actually try to connect to a non-existent server
+    // Use environment variable for backend URL, fallback to localhost for development
+    const backendUrl = import.meta.env.VITE_WS_URL || 'http://localhost:4000';
+    
+    const newSocket = io(backendUrl, {
+      autoConnect: true,
+      reconnection: true,
+      reconnectionDelay: 1000,
+      reconnectionDelayMax: 5000,
+      reconnectionAttempts: 5,
     });
+
+    newSocket.on('connect', () => {
+      console.log('✅ WebSocket connected to:', backendUrl);
+    });
+
+    newSocket.on('disconnect', () => {
+      console.log('❌ WebSocket disconnected');
+    });
+
+    newSocket.on('connect_error', (error) => {
+      console.error('WebSocket connection error:', error);
+    });
+
     setSocket(newSocket);
 
     return () => {
