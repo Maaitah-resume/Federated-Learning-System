@@ -3,7 +3,7 @@ import { env } from './env.js';
 
 export const connectDB = async () => {
   try {
-    if (!env.MONGODB_URI || env.MONGODB_URI === 'connection_string_here') {
+    if (!env.MONGODB_URI || env.MONGODB_URI === 'mongodb+srv://maaitah2004_db_user:FiobSYpNKxLfAXBs@cluster0.zx7cbgt.mongodb.net/?appName=Cluster0') {
       console.warn('MONGODB_URI is not configured. Database connection skipped.');
       return;
     }
