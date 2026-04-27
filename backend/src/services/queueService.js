@@ -2,7 +2,7 @@
 const Participant   = require('../models/Participant');
 const Company       = require('../models/Company');
 const jobManager    = require('./jobManager');
-//const emitter       = require('../websocket/eventEmitter');
+const emitter       = require('../websocket/eventEmitter');
 const { PARTICIPANT_STATUS, WS_EVENTS } = require('../config/constants');
 const { MIN_CLIENTS, DEFAULT_ROUNDS }   = require('../config/env');
 
