@@ -5,8 +5,7 @@ interface User {
   company: string;
   token: string;
   email: string;
-  user_id?: string;
-  username?: string;
+  companyId?: string;
 }
 
 interface AuthContextType {
@@ -27,30 +26,32 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const login = async (username: string, password: string) => {
+  const login = async (email: string, password: string) => {
     setIsLoading(true);
     setError(null);
-    
+
     try {
-      const response = await api.auth.login({ username, password });
+      // Backend expects: { email, password }
+      // Backend finds by email OR companyId, auto-creates if missing
+      const response = await api.auth.login({ email, password });
       
-      if (response.data.status === 'success') {
-        const userData = response.data.data;
-        const newUser: User = {
-          company: userData.username || username,
-          email: userData.email || `${username}@demo.com`,
-          token: userData.token,
-          user_id: userData.user_id,
-          username: userData.username,
-        };
-        
-        setUser(newUser);
-        localStorage.setItem('fl_user', JSON.stringify(newUser));
-      } else {
-        throw new Error(response.data.detail || 'Login failed');
-      }
+      const { token, company } = response.data;
+
+      const newUser: User = {
+        company: company.companyName || company.companyId,
+        email: company.email,
+        token: token,
+        companyId: company.companyId,
+      };
+
+      setUser(newUser);
+      localStorage.setItem('fl_user', JSON.stringify(newUser));
     } catch (err: any) {
-      const errorMessage = err.response?.data?.detail || err.message || 'Login failed';
+      const errorMessage =
+        err.response?.data?.error?.message ||
+        err.response?.data?.message ||
+        err.message ||
+        'Login failed. Please try again.';
       setError(errorMessage);
       throw new Error(errorMessage);
     } finally {
