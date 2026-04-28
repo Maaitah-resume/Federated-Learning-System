@@ -57,11 +57,12 @@ apiClient.interceptors.response.use(
 // API endpoints
 export const api = {
   auth: {
-    login: (data: { username: string; password: string }) =>
-      apiClient.post('/api/v1/auth/login', data),
+    // Backend expects: { email, password } at /api/auth/login
+    login: (data: { email: string; password: string }) =>
+      apiClient.post('/api/auth/login', data),
     
-    register: (data: { username: string; email: string; password: string }) =>
-      apiClient.post('/api/v1/auth/register', data),
+    register: (data: { email: string; password: string }) =>
+      apiClient.post('/api/auth/register', data),
     
     logout: () => apiClient.post('/api/auth/logout'),
   },
