@@ -1,12 +1,16 @@
 import axios from 'axios';
 
-// Get API URL from environment variable, fallback to localhost for development
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:4000';
+// Production URLs hardcoded as fallback (since .env.production is gitignored)
+const API_BASE_URL = 
+  import.meta.env.VITE_API_URL || 
+  'https://earnest-heart-production.up.railway.app';
+
+console.log('🔧 API Base URL:', API_BASE_URL);
 
 // Create axios instance with default config
 export const apiClient = axios.create({
   baseURL: API_BASE_URL,
-  timeout: 10000,
+  timeout: 30000, // 30 seconds (increased from 10s)
   headers: {
     'Content-Type': 'application/json',
   },
@@ -15,6 +19,7 @@ export const apiClient = axios.create({
 // Add request interceptor to include auth token
 apiClient.interceptors.request.use(
   (config) => {
+    console.log('📤 API Request:', config.method?.toUpperCase(), config.baseURL + config.url);
     const userStr = localStorage.getItem('fl_user');
     if (userStr) {
       try {
@@ -35,10 +40,13 @@ apiClient.interceptors.request.use(
 
 // Add response interceptor for error handling
 apiClient.interceptors.response.use(
-  (response) => response,
+  (response) => {
+    console.log('📥 API Response:', response.status, response.config.url);
+    return response;
+  },
   (error) => {
+    console.error('❌ API Error:', error.message, error.config?.url);
     if (error.response?.status === 401) {
-      // Unauthorized - clear user data and redirect to login
       localStorage.removeItem('fl_user');
       window.location.href = '/login';
     }
@@ -48,7 +56,6 @@ apiClient.interceptors.response.use(
 
 // API endpoints
 export const api = {
-  // Authentication
   auth: {
     login: (data: { username: string; password: string }) =>
       apiClient.post('/api/v1/auth/login', data),
@@ -59,14 +66,12 @@ export const api = {
     logout: () => apiClient.post('/api/auth/logout'),
   },
 
-  // Queue management
   queue: {
     getQueue: () => apiClient.get('/api/queue'),
     joinQueue: (data: any) => apiClient.post('/api/queue/join', data),
     leaveQueue: (companyId: string) => apiClient.delete(`/api/queue/${companyId}`),
   },
 
-  // Training
   training: {
     getJobs: () => apiClient.get('/api/training/jobs'),
     getJobDetails: (jobId: string) => apiClient.get(`/api/training/jobs/${jobId}`),
@@ -74,7 +79,6 @@ export const api = {
     stopTraining: (jobId: string) => apiClient.post(`/api/training/${jobId}/stop`),
   },
 
-  // Models
   models: {
     getModels: () => apiClient.get('/api/models'),
     getModelDetails: (modelId: string) => apiClient.get(`/api/models/${modelId}`),
