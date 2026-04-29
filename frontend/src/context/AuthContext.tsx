@@ -2,18 +2,19 @@ import React, { createContext, useState, useContext, ReactNode } from 'react';
 import { api } from '../config/api';
 
 interface User {
-  company: string;
-  token: string;
-  email: string;
-  companyId?: string;
+  company:    string;
+  companyId:  string;
+  email:      string;
+  token:      string;
+  role?:      string;
 }
 
 interface AuthContextType {
-  user: User | null;
-  login: (email: string, password: string) => Promise<void>;
-  logout: () => void;
+  user:      User | null;
+  login:     (email: string, password: string) => Promise<void>;
+  logout:    () => void;
   isLoading: boolean;
-  error: string | null;
+  error:     string | null;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -24,24 +25,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return saved ? JSON.parse(saved) : null;
   });
   const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError]         = useState<string | null>(null);
 
   const login = async (email: string, password: string) => {
     setIsLoading(true);
     setError(null);
 
     try {
-      // Backend expects: { email, password }
-      // Backend finds by email OR companyId, auto-creates if missing
       const response = await api.auth.login({ email, password });
-      
       const { token, company } = response.data;
 
       const newUser: User = {
-        company: company.companyName || company.companyId,
-        email: company.email,
-        token: token,
+        company:   company.companyName,
         companyId: company.companyId,
+        email:     company.email,
+        token,
+        role:      company.role,
       };
 
       setUser(newUser);
@@ -49,7 +48,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } catch (err: any) {
       const errorMessage =
         err.response?.data?.error?.message ||
-        err.response?.data?.message ||
         err.message ||
         'Login failed. Please try again.';
       setError(errorMessage);
