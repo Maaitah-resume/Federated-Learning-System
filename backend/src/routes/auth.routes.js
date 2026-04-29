@@ -1,4 +1,4 @@
-// src/routes/auth.routes.js
+// Updated auth.routes.js with proper error status codes
 const express     = require('express');
 const authService = require('../services/authService');
 const { authenticate } = require('../middleware/authMiddleware');
@@ -6,7 +6,7 @@ const { authenticate } = require('../middleware/authMiddleware');
 const router = express.Router();
 
 // POST /api/auth/login
-router.post('/login', async (req, res, next) => {
+router.post('/login', async (req, res) => {
   try {
     const { email, password } = req.body;
     if (!email || !password) {
@@ -16,13 +16,20 @@ router.post('/login', async (req, res, next) => {
     }
     const { token, company } = await authService.login(email, password);
     return res.status(200).json({ token, company });
-  } catch (err) { next(err); }
+  } catch (err) {
+    const status = err.statusCode || 500;
+    return res.status(status).json({
+      error: {
+        code: status === 401 ? 'AUTH_ERROR' : 'SERVER_ERROR',
+        message: err.message || 'Login failed',
+      },
+    });
+  }
 });
 
 // POST /api/auth/logout
 router.post('/logout', authenticate, async (req, res, next) => {
   try {
-    // Demo mode: stateless — client just discards the token
     return res.status(200).json({ success: true });
   } catch (err) { next(err); }
 });
