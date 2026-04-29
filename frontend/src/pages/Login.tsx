@@ -1,24 +1,39 @@
 import React, { useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useNavigate } from 'react-router-dom';
-import { Mail, ArrowRight, ShieldCheck, Building2 } from 'lucide-react';
+import { Mail, Lock, ArrowRight, ShieldCheck, Building2 } from 'lucide-react';
 import { motion } from 'motion/react';
 
+const DEMO_ACCOUNTS = [
+  { id: 'alpha', name: 'Alpha Corp',     email: 'alpha@demo.com', color: 'bg-indigo-600 hover:bg-indigo-500' },
+  { id: 'beta',  name: 'Beta Industries', email: 'beta@demo.com',  color: 'bg-emerald-600 hover:bg-emerald-500' },
+  { id: 'gamma', name: 'Gamma Systems',   email: 'gamma@demo.com', color: 'bg-purple-600 hover:bg-purple-500' },
+];
+
 export default function Login() {
-  const [email, setEmail] = useState('');
-  const [company, setCompany] = useState('');
+  const [email, setEmail]       = useState('');
+  const [password, setPassword] = useState('demo123');
   const { login, isLoading, error } = useAuth();
   const navigate = useNavigate();
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      // Backend login(email, password) - we send email as identifier
-      // companyId is also accepted as email field by backend
-      await login(email || company, 'demo');
+      await login(email, password);
       navigate('/');
     } catch (err) {
-      // Error shown via AuthContext error state
+      // Error displayed via AuthContext error state
+    }
+  };
+
+  // Quick login - clicks a demo account button
+  const quickLogin = async (acc: typeof DEMO_ACCOUNTS[0]) => {
+    setEmail(acc.email);
+    try {
+      await login(acc.email, 'demo123');
+      navigate('/');
+    } catch (err) {
+      // Error displayed via AuthContext error state
     }
   };
 
@@ -35,75 +50,94 @@ export default function Login() {
         className="w-full max-w-md"
       >
         <div className="bg-slate-900 border border-slate-800 p-10 rounded-[2.5rem] shadow-2xl">
-          <div className="flex flex-col items-center mb-10">
+          <div className="flex flex-col items-center mb-8">
             <div className="w-16 h-16 bg-indigo-600 rounded-2xl flex items-center justify-center shadow-xl shadow-indigo-500/20 mb-6">
               <ShieldCheck className="text-white" size={32} />
             </div>
             <h2 className="text-3xl font-bold text-white tracking-tight">Welcome Back</h2>
-            <p className="text-slate-400 mt-2 text-center">Access the Federated Learning Control Center</p>
+            <p className="text-slate-400 mt-2 text-center">Federated Learning Control Center</p>
+          </div>
+
+          {/* Quick Login Buttons */}
+          <div className="mb-6">
+            <p className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-3 text-center">
+              Quick Sign In
+            </p>
+            <div className="space-y-2">
+              {DEMO_ACCOUNTS.map((acc) => (
+                <button
+                  key={acc.id}
+                  type="button"
+                  onClick={() => quickLogin(acc)}
+                  disabled={isLoading}
+                  className={`w-full ${acc.color} disabled:opacity-50 disabled:cursor-not-allowed text-white py-3 rounded-xl font-medium transition-all flex items-center justify-between px-5 group`}
+                >
+                  <div className="flex items-center gap-3">
+                    <Building2 size={18} />
+                    <span>{acc.name}</span>
+                  </div>
+                  <ArrowRight size={18} className="group-hover:translate-x-1 transition-transform" />
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Divider */}
+          <div className="flex items-center gap-3 my-6">
+            <div className="h-px bg-slate-800 flex-1"></div>
+            <span className="text-xs text-slate-600 uppercase tracking-widest">or manually</span>
+            <div className="h-px bg-slate-800 flex-1"></div>
           </div>
 
           {error && (
-            <div className="mb-6 p-4 bg-red-500/10 border border-red-500/20 rounded-xl text-red-400 text-sm">
+            <div className="mb-4 p-3 bg-red-500/10 border border-red-500/20 rounded-xl text-red-400 text-sm">
               {error}
             </div>
           )}
 
-          <form onSubmit={handleSubmit} className="space-y-6">
+          <form onSubmit={handleSubmit} className="space-y-4">
             <div className="space-y-2">
-              <label className="text-xs font-bold text-slate-500 uppercase tracking-widest ml-1">Company Name</label>
+              <label className="text-xs font-bold text-slate-500 uppercase tracking-widest ml-1">Email</label>
               <div className="relative">
-                <Building2 className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-500" size={20} />
+                <Mail className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-500" size={18} />
                 <input
                   type="text"
-                  placeholder="e.g. TechCorp AI"
-                  className="w-full pl-12 pr-4 py-4 bg-slate-800/50 border border-slate-700 rounded-2xl text-white placeholder:text-slate-600 focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all outline-none"
-                  value={company}
-                  onChange={(e) => setCompany(e.target.value)}
-                  disabled={isLoading}
-                />
-              </div>
-            </div>
-
-            <div className="space-y-2">
-              <label className="text-xs font-bold text-slate-500 uppercase tracking-widest ml-1">Email Address</label>
-              <div className="relative">
-                <Mail className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-500" size={20} />
-                <input
-                  type="text"
-                  placeholder="name@company.com  or just type anything"
-                  className="w-full pl-12 pr-4 py-4 bg-slate-800/50 border border-slate-700 rounded-2xl text-white placeholder:text-slate-600 focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all outline-none"
+                  placeholder="alpha@demo.com or alpha"
+                  className="w-full pl-12 pr-4 py-3 bg-slate-800/50 border border-slate-700 rounded-xl text-white placeholder:text-slate-600 focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all outline-none"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   disabled={isLoading}
                 />
               </div>
-              <p className="text-xs text-slate-500 ml-1">Enter your email OR company name — either works!</p>
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-xs font-bold text-slate-500 uppercase tracking-widest ml-1">Password</label>
+              <div className="relative">
+                <Lock className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-500" size={18} />
+                <input
+                  type="password"
+                  placeholder="demo123"
+                  className="w-full pl-12 pr-4 py-3 bg-slate-800/50 border border-slate-700 rounded-xl text-white placeholder:text-slate-600 focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all outline-none"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  disabled={isLoading}
+                />
+              </div>
             </div>
 
             <button
               type="submit"
-              disabled={isLoading || (!email && !company)}
-              className="w-full bg-indigo-600 hover:bg-indigo-500 disabled:bg-indigo-600/50 disabled:cursor-not-allowed text-white py-4 rounded-2xl font-bold text-lg transition-all flex items-center justify-center gap-2 group shadow-xl shadow-indigo-500/20"
+              disabled={isLoading || !email || !password}
+              className="w-full bg-slate-700 hover:bg-slate-600 disabled:bg-slate-800 disabled:cursor-not-allowed text-white py-3 rounded-xl font-medium transition-all flex items-center justify-center gap-2"
             >
               {isLoading ? 'Signing in...' : 'Sign In'}
-              {!isLoading && <ArrowRight size={20} className="group-hover:translate-x-1 transition-transform" />}
             </button>
           </form>
 
-          <div className="mt-6 text-center text-xs text-slate-500 space-y-1">
-            <p>Demo: enter <span className="text-indigo-400">alpha@demo.com</span> to sign in as Alpha Corp</p>
-            <p>Or enter any email — account is created automatically</p>
-          </div>
-
-          <div className="mt-8 pt-8 border-t border-slate-800 flex justify-center gap-6">
-            {[['128k','Nodes'],['99.9%','Uptime'],['AES','Secure']].map(([val, label]) => (
-              <div key={label} className="flex flex-col items-center">
-                <span className="text-white font-bold">{val}</span>
-                <span className="text-[10px] text-slate-500 uppercase tracking-wider">{label}</span>
-              </div>
-            ))}
-          </div>
+          <p className="mt-6 text-center text-xs text-slate-500">
+            Demo credentials: any of <span className="text-indigo-400">alpha</span> · <span className="text-emerald-400">beta</span> · <span className="text-purple-400">gamma</span> with password <span className="text-slate-300">demo123</span>
+          </p>
         </div>
       </motion.div>
     </div>
