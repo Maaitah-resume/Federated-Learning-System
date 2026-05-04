@@ -9,11 +9,11 @@ import TrainingControl from './pages/TrainingControl';
 import Training from './pages/Training';
 import Queue from './pages/Queue';
 import Models from './pages/Models';
+import Login from './pages/Login';
 
 function AppShell({ children }: { children: React.ReactNode }) {
   const { user, selectParticipant } = useAuth();
 
-  // First visit: show participant picker (no login, just pick your ID)
   if (!user) {
     return <ParticipantPicker onSelect={selectParticipant} />;
   }
@@ -29,8 +29,11 @@ function AppShell({ children }: { children: React.ReactNode }) {
 }
 
 function AppRoutes() {
+  const { user } = useAuth();
+
   return (
     <Routes>
+      <Route path="/login"    element={user ? <Navigate to="/" replace /> : <Login />} />
       <Route path="/"         element={<AppShell><Dashboard /></AppShell>} />
       <Route path="/control"  element={<AppShell><TrainingControl /></AppShell>} />
       <Route path="/training" element={<AppShell><Training /></AppShell>} />
