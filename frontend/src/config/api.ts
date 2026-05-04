@@ -13,7 +13,6 @@ export const apiClient = axios.create({
     'Content-Type': 'application/json',
   },
 });
-
 apiClient.interceptors.request.use(
   (config) => {
     console.log('📤 API Request:', config.method?.toUpperCase(), config.baseURL + config.url);
@@ -21,7 +20,6 @@ apiClient.interceptors.request.use(
     if (saved) {
       try {
         const id = JSON.parse(saved);
-        // Send the demo token the backend actually expects
         config.headers.Authorization = `Bearer demo-token-${id}`;
       } catch (error) {
         console.error('Error parsing participant data:', error);
