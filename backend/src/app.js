@@ -73,7 +73,29 @@ app.post('/api/demo/seed', async (req, res) => {
   }
 });
 
-// ── Catch-all: serve React app for all non-API routes ─────────────────────────
+// One-time fix: patch models missing participants field
+app.post('/api/debug/fix-models', async (req, res) => {
+  try {
+    const Model          = require('./models/Models');
+    const TrainingMetric = require('./models/TrainingMetric');
+    const models         = await Model.find({});
+    const results        = [];
+    for (const model of models) {
+      const companyIds = await TrainingMetric.find({
+        jobId: model.jobId, type: 'local'
+      }).distinct('companyId');
+      if (companyIds.length > 0) {
+        await Model.updateOne({ _id: model._id }, {
+          $set: { participants: companyIds, status: 'AVAILABLE' }
+        });
+        results.push(`fixed: ${model.modelId}`);
+      }
+    }
+    return res.json({ done: true, results });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
 app.get('*', (req, res, next) => {
   if (req.path.startsWith('/api/') || req.path.startsWith('/health')) {
     return next();
