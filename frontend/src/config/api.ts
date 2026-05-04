@@ -43,8 +43,14 @@ apiClient.interceptors.response.use(
   (error) => {
     console.error('❌ API Error:', error.message, error.config?.url);
     if (error.response?.status === 401) {
-      localStorage.removeItem('fl_participant'); // ← fixed key
-      window.location.href = '/login';           // ← /login now exists
+      const saved = localStorage.getItem('fl_participant');
+      // Only redirect if NOT a demo participant
+      const isDemoUser = saved && ['alpha', 'beta', 'gamma'].includes(JSON.parse(saved));
+      if (!isDemoUser) {
+        localStorage.removeItem('fl_participant');
+        window.location.href = '/login';
+      }
+      // Demo users: just ignore 401s — backend doesn't accept demo tokens
     }
     return Promise.reject(error);
   }
