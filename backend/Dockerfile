@@ -5,8 +5,7 @@ RUN apk add --no-cache curl
 WORKDIR /app
 
 COPY package*.json ./
-RUN npm ci --only=production
-
+RUN npm install --only=production
 COPY src/ ./src/
 COPY server.js ./
 
