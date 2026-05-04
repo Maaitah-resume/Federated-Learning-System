@@ -1,44 +1,40 @@
 import axios from 'axios';
 
-// Production URLs hardcoded as fallback (since .env.production is gitignored)
-const API_BASE_URL = 
-  import.meta.env.VITE_API_URL || 
+const API_BASE_URL =
+  import.meta.env.VITE_API_URL ||
   'https://earnest-heart-production.up.railway.app';
 
 console.log('🔧 API Base URL:', API_BASE_URL);
 
-// Create axios instance with default config
 export const apiClient = axios.create({
   baseURL: API_BASE_URL,
-  timeout: 30000, // 30 seconds (increased from 10s)
+  timeout: 30000,
   headers: {
     'Content-Type': 'application/json',
   },
 });
 
-// Add request interceptor to include auth token
 apiClient.interceptors.request.use(
   (config) => {
     console.log('📤 API Request:', config.method?.toUpperCase(), config.baseURL + config.url);
-    const userStr = localStorage.getItem('fl_user');
-    if (userStr) {
+    const saved = localStorage.getItem('fl_participant'); // ← fixed key
+    if (saved) {
       try {
-        const user = JSON.parse(userStr);
-        if (user.token) {
-          config.headers.Authorization = `Bearer ${user.token}`;
+        const id = JSON.parse(saved);
+        // Only send token if it's NOT a fake demo token
+        const token = `demo-token-${id}`;
+        if (!token.startsWith('demo-token-')) {
+          config.headers.Authorization = `Bearer ${token}`;
         }
       } catch (error) {
-        console.error('Error parsing user data:', error);
+        console.error('Error parsing participant data:', error);
       }
     }
     return config;
   },
-  (error) => {
-    return Promise.reject(error);
-  }
+  (error) => Promise.reject(error)
 );
 
-// Add response interceptor for error handling
 apiClient.interceptors.response.use(
   (response) => {
     console.log('📥 API Response:', response.status, response.config.url);
@@ -47,45 +43,37 @@ apiClient.interceptors.response.use(
   (error) => {
     console.error('❌ API Error:', error.message, error.config?.url);
     if (error.response?.status === 401) {
-      localStorage.removeItem('fl_user');
-      window.location.href = '/login';
+      localStorage.removeItem('fl_participant'); // ← fixed key
+      window.location.href = '/login';           // ← /login now exists
     }
     return Promise.reject(error);
   }
 );
 
-// API endpoints
 export const api = {
   auth: {
-    // Backend expects: { email, password } at /api/auth/login
     login: (data: { email: string; password: string }) =>
       apiClient.post('/api/auth/login', data),
-    
     register: (data: { email: string; password: string }) =>
       apiClient.post('/api/auth/register', data),
-    
     logout: () => apiClient.post('/api/auth/logout'),
   },
-
   queue: {
     getQueue: () => apiClient.get('/api/queue'),
     joinQueue: (data: any) => apiClient.post('/api/queue/join', data),
     leaveQueue: (companyId: string) => apiClient.delete(`/api/queue/${companyId}`),
   },
-
   training: {
     getJobs: () => apiClient.get('/api/training/jobs'),
     getJobDetails: (jobId: string) => apiClient.get(`/api/training/jobs/${jobId}`),
     startTraining: (data: any) => apiClient.post('/api/training/start', data),
     stopTraining: (jobId: string) => apiClient.post(`/api/training/${jobId}/stop`),
   },
-
   models: {
     getModels: () => apiClient.get('/api/models'),
     getModelDetails: (modelId: string) => apiClient.get(`/api/models/${modelId}`),
-    downloadModel: (modelId: string) => apiClient.get(`/api/models/${modelId}/download`, {
-      responseType: 'blob',
-    }),
+    downloadModel: (modelId: string) =>
+      apiClient.get(`/api/models/${modelId}/download`, { responseType: 'blob' }),
   },
 };
 
