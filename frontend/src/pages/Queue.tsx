@@ -1,24 +1,11 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState } from 'react';
 import { Users, Loader2, CheckCircle2, Monitor, Shield, Upload, FileText, X } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { apiClient } from '../config/api';
-
-interface QueueNode {
-  companyId: string;
-  joinedAt:  string;
-  status:    string;
-}
-
-interface QueueState {
-  count:     number;
-  companies: QueueNode[];
-  activeJob: { jobId: string; status: string } | null;
-}
+import { useQueue } from '../context/QueueContext';
 
 export default function Queue() {
-  const [queue,   setQueue]   = useState<QueueState>({ count: 0, companies: [], activeJob: null });
-  const [inQueue, setInQueue] = useState(false);
-  const [loading, setLoading] = useState(true);
+  const { queue, inQueue, loading, refresh } = useQueue();
   const [joining, setJoining] = useState(false);
   const [leaving, setLeaving] = useState(false);
   const [file,    setFile]    = useState<File | null>(null);
@@ -29,52 +16,30 @@ export default function Queue() {
     return saved ? JSON.parse(saved) : null;
   })();
 
-  const fetchQueue = useCallback(async () => {
+  const joinQueue = async () => {
+    if (!file) return;
+    setJoining(true);
     try {
-      const res   = await apiClient.get('/api/queue');
-      const nodes = res.data.participants || res.data.companies || [];
-      setQueue({ ...res.data, companies: nodes });
-      const inQ = nodes.some((c: QueueNode) => c.companyId === currentId);
-      setInQueue(inQ);
-    } catch (err) {
-      console.error('Queue fetch error:', err);
+      const formData = new FormData();
+      formData.append('file', file);
+      await apiClient.post('/api/data/upload', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
+      await apiClient.post('/api/queue/join');
+      await refresh();
+    } catch (err: any) {
+      console.error('Join queue error:', err);
+      alert(err.response?.data?.error?.message || err.response?.data?.message || 'Failed to join queue');
     } finally {
-      setLoading(false);
+      setJoining(false);
     }
-  }, [currentId]);
-
-  useEffect(() => {
-    fetchQueue();
-    const interval = setInterval(fetchQueue, 5000);
-    return () => clearInterval(interval);
-  }, [fetchQueue]);
-
-const joinQueue = async () => {
-  if (!file) return;
-  setJoining(true);
-  try {
-    // Upload data first
-    const formData = new FormData();
-    formData.append('file', file);
-    await apiClient.post('/api/data/upload', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-    });
-    // Then join the queue
-    await apiClient.post('/api/queue/join');
-    await fetchQueue();
-  } catch (err: any) {
-    console.error('Join queue error:', err);
-    alert(err.response?.data?.error?.message || 'Failed to join queue');
-  } finally {
-    setJoining(false);
-  }
-};
+  };
 
   const leaveQueue = async () => {
     setLeaving(true);
     try {
       await apiClient.post('/api/queue/leave');
-      await fetchQueue();
+      await refresh();
     } catch (err) {
       console.error('Leave queue error:', err);
     } finally {
@@ -97,10 +62,8 @@ const joinQueue = async () => {
       </header>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-        {/* Left panel */}
         <div className="lg:col-span-1 space-y-6">
 
-          {/* Step 1: Upload Data */}
           <div className="bg-white p-6 rounded-[2rem] shadow-sm border border-slate-100">
             <div className="flex items-center gap-3 mb-4">
               <div className="w-8 h-8 rounded-full bg-indigo-600 text-white flex items-center justify-center text-sm font-bold">1</div>
@@ -142,7 +105,6 @@ const joinQueue = async () => {
             </div>
           </div>
 
-          {/* Step 2: Join Queue */}
           <div className="bg-white p-6 rounded-[2rem] shadow-sm border border-slate-100 text-center relative overflow-hidden">
             <div className="absolute top-0 left-0 w-full h-1 bg-indigo-600"></div>
             <div className="flex items-center gap-3 mb-4">
@@ -216,7 +178,6 @@ const joinQueue = async () => {
             )}
           </div>
 
-          {/* Secure Aggregation info */}
           <div className="bg-slate-900 p-6 rounded-[2rem] text-white">
             <Shield className="text-indigo-400 mb-3" size={28} />
             <h3 className="text-base font-bold mb-1">Secure Aggregation</h3>
@@ -226,7 +187,6 @@ const joinQueue = async () => {
           </div>
         </div>
 
-        {/* Right panel - Connected Nodes */}
         <div className="lg:col-span-2">
           <div className="bg-white rounded-[2rem] shadow-sm border border-slate-100 overflow-hidden">
             <div className="p-6 border-b border-slate-50 flex justify-between items-center">
