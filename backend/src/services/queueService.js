@@ -1,31 +1,21 @@
-// src/services/queueService.js
-const Participant   = require('../models/Participant');
-const Company       = require('../models/Company');
-const UserData      = require('../models/UserData');
-const jobManager    = require('./simulatedOrchestrator');  // simulated version exposes getActiveJob
-const emitter       = require('../websocket/eventEmitter');
+const Participant        = require('../models/Participant');
+const Company            = require('../models/Company');
+const UserData           = require('../models/UserData');
+const simulatedOrch      = require('./simulatedOrchestrator');
+const emitter            = require('../websocket/eventEmitter');
 const { PARTICIPANT_STATUS, WS_EVENTS } = require('../config/constants');
-const { MIN_CLIENTS, DEFAULT_ROUNDS }   = require('../config/env');
+const { MIN_CLIENTS }    = require('../config/env');
 
-// In-memory lock flag to prevent double-start race condition
 let isStartingJob = false;
 
-// ─── Queue Reads ────────────────────────────────────────────────────────────
-
-/**
- * Returns the current queue state — list of waiting companies + metadata.
- */
 async function getQueueState() {
-  const queued = await Participant.find({
-    status: PARTICIPANT_STATUS.QUEUED,
-    jobId:  null,
-  });
+  const queued = await Participant.find({ status: PARTICIPANT_STATUS.QUEUED, jobId: null });
 
   const companyIds = queued.map((p) => p.companyId);
-  const companies  = await Company.find({ companyId: { $in: companyIds } })
-    .select('companyId companyName');
+  const companies  = await Company.find({ companyId: { $in: companyIds } }).select('companyId companyName');
+  const nameMap    = Object.fromEntries(companies.map((c) => [c.companyId, c.companyName]));
 
-  const nameMap = Object.fromEntries(companies.map((c) => [c.companyId, c.companyName]));
+  const activeJob = simulatedOrch.getActiveJob();
 
   return {
     participants: queued.map((p) => ({
@@ -35,141 +25,92 @@ async function getQueueState() {
       status:      p.status,
     })),
     count:        queued.length,
-    minRequired:  MIN_CLIENTS,
-    readyToStart: queued.length >= MIN_CLIENTS,
+    minRequired:  MIN_CLIENTS || 3,
+    readyToStart: queued.length >= (MIN_CLIENTS || 3),
+    activeJob:    activeJob ? { jobId: activeJob.jobId, status: activeJob.status } : null,
   };
 }
 
-// ─── Join ────────────────────────────────────────────────────────────────────
-
-/**
- * Adds a company to the queue.
- * Returns the updated queue state.
- * Throws if no data uploaded, already queued, or already in an active job.
- */
 async function joinQueue(companyId) {
-  // Require uploaded data before joining
+  // Require uploaded data
   const userData = await UserData.findOne({ companyId });
   if (!userData) {
-    throw Object.assign(new Error('Please upload your data before joining the queue'), {
-      status: 400,
-      code:   'NO_DATA_UPLOADED',
-    });
+    const err = new Error('Please upload your data before joining the queue');
+    err.status = 400;
+    throw err;
   }
 
-  // Already in queue?
-  const existing = await Participant.findOne({
-    companyId,
-    status: PARTICIPANT_STATUS.QUEUED,
-    jobId:  null,
-  });
+  // Already queued?
+  const existing = await Participant.findOne({ companyId, status: PARTICIPANT_STATUS.QUEUED, jobId: null });
   if (existing) {
-    throw Object.assign(new Error('Already in queue'), {
-      status: 409,
-      code:   'ALREADY_QUEUED',
-    });
+    const err = new Error('Already in queue');
+    err.status = 409;
+    throw err;
   }
 
-  // Already in an active training job?
-  const activeJob = await jobManager.getActiveJob();
+  // Already in active job?
+  const activeJob = simulatedOrch.getActiveJob();
   if (activeJob && activeJob.participantIds.includes(companyId)) {
-    throw Object.assign(new Error('Training already in progress for your company'), {
-      status: 409,
-      code:   'ALREADY_IN_JOB',
-    });
+    const err = new Error('Training already in progress for your company');
+    err.status = 409;
+    throw err;
   }
 
-  // Create or update the participant record
   await Participant.findOneAndUpdate(
     { companyId, jobId: null },
-    {
-      $set: {
-        status:        PARTICIPANT_STATUS.QUEUED,
-        joinedQueueAt: new Date(),
-      },
-    },
+    { $set: { status: PARTICIPANT_STATUS.QUEUED, joinedQueueAt: new Date() } },
     { upsert: true, new: true }
   );
 
   console.log(`[Queue] ${companyId} joined the queue`);
 
-  // Broadcast updated queue to all connected browsers
   const state = await getQueueState();
   emitter.emit(WS_EVENTS.QUEUE_UPDATED, state);
 
-  // Check if we have enough participants to start
   await checkAndStart();
-
   return state;
 }
 
-// ─── Leave ───────────────────────────────────────────────────────────────────
-
-/**
- * Removes a company from the queue.
- * Throws if they are not in the queue.
- */
 async function leaveQueue(companyId) {
-  const participant = await Participant.findOne({
-    companyId,
-    status: PARTICIPANT_STATUS.QUEUED,
-    jobId:  null,
-  });
-
+  const participant = await Participant.findOne({ companyId, status: PARTICIPANT_STATUS.QUEUED, jobId: null });
   if (!participant) {
-    throw Object.assign(new Error('Not currently in the queue'), {
-      status: 400,
-      code:   'NOT_IN_QUEUE',
-    });
+    const err = new Error('Not currently in the queue');
+    err.status = 400;
+    throw err;
   }
 
   await Participant.deleteOne({ _id: participant._id });
-
   console.log(`[Queue] ${companyId} left the queue`);
 
   const state = await getQueueState();
   emitter.emit(WS_EVENTS.QUEUE_UPDATED, state);
-
   return state;
 }
 
-// ─── Threshold check ─────────────────────────────────────────────────────────
-
-/**
- * Called after every join.
- * If MIN_CLIENTS are waiting and no job is active, starts a new training job.
- */
 async function checkAndStart() {
   if (isStartingJob) return;
-  const count = await Participant.countDocuments({ ... });
-  if (count < MIN_CLIENTS) return;  // ← waits for 3 (MIN_CLIENTS)
-  // ...
-  await orchestratorService.startJob(participantIds);
-}
 
-  if (count < MIN_CLIENTS) return;
+  const minClients = MIN_CLIENTS || 3;
+  const count = await Participant.countDocuments({ status: PARTICIPANT_STATUS.QUEUED, jobId: null });
 
-  // Check no job is already running
-  const activeJob = await jobManager.getActiveJob();
-  if (activeJob) return;
+  if (count < minClients) {
+    console.log(`[Queue] ${count}/${minClients} — not enough to start`);
+    return;
+  }
+
+  const activeJob = simulatedOrch.getActiveJob();
+  if (activeJob) {
+    console.log('[Queue] Job already running');
+    return;
+  }
 
   isStartingJob = true;
-  console.log(`[Queue] Threshold reached (${count}/${MIN_CLIENTS}) — starting job`);
+  console.log(`[Queue] Threshold reached (${count}/${minClients}) — starting job`);
 
   try {
-    // Snapshot exactly MIN_CLIENTS participants — the rest wait for the next job
-    const participants = await Participant.find({
-      status: PARTICIPANT_STATUS.QUEUED,
-      jobId:  null,
-    }).limit(MIN_CLIENTS);
-
-    const participantIds = participants.map((p) => p.companyId);
-
-    // Delegate job creation + orchestration to the orchestrator
-    // (imported lazily to avoid circular dependency)
-    const orchestratorService = require('./simulatedOrchestrator');
-    await orchestratorService.startJob(participantIds);
-
+    const participants    = await Participant.find({ status: PARTICIPANT_STATUS.QUEUED, jobId: null }).limit(minClients);
+    const participantIds  = participants.map((p) => p.companyId);
+    await simulatedOrch.startJob(participantIds);
   } catch (err) {
     console.error('[Queue] Failed to start job:', err.message);
   } finally {
@@ -177,19 +118,10 @@ async function checkAndStart() {
   }
 }
 
-/**
- * Polling fallback — runs every 10 seconds in case a WebSocket join event
- * was missed or the server restarted mid-queue.
- */
 function startPolling() {
   setInterval(async () => {
-    try {
-      await checkAndStart();
-    } catch (err) {
-      console.error('[Queue] Polling error:', err.message);
-    }
+    try { await checkAndStart(); } catch (err) { console.error('[Queue] Polling error:', err.message); }
   }, 10_000);
-
   console.log('[Queue] Polling started (10s interval)');
 }
 
