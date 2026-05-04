@@ -20,11 +20,7 @@ const healthRoutes   = require('./routes/health.routes');
 const app = express();
 
 // ── Security & logging ────────────────────────────────────────────────────────
-app.use(
-  helmet({
-    contentSecurityPolicy: false,
-  })
-);
+app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors({ origin: '*' }));
 app.use(morgan('dev'));
 
@@ -45,7 +41,7 @@ app.use('/api/metrics',  apiLimiter,   metricsRoutes);
 app.use('/api/training', apiLimiter,   trainingRoutes);
 app.use('/api/models',   apiLimiter,   modelRoutes);
 
-// ── Demo seed data ────────────────────────────────────────────────────────────
+// ── Demo seed data ─────────────────────────────────────────────────────────────
 const Company = require('./models/Company');
 
 app.post('/api/demo/seed', async (req, res) => {
@@ -55,7 +51,6 @@ app.post('/api/demo/seed', async (req, res) => {
       { companyId: 'amer',     companyName: 'Amer HTU',     email: 'Amer@htu.edu.jo',     passwordHash: '123', role: 'client' },
       { companyId: 'ammar',    companyName: 'Ammar HTU',    email: 'Ammar@htu.edu.jo',    passwordHash: '123', role: 'client' },
     ];
-
     const results = [];
     for (const c of demoCompanies) {
       const existing = await Company.findOne({ companyId: c.companyId });
@@ -66,36 +61,44 @@ app.post('/api/demo/seed', async (req, res) => {
         results.push(`exists:  ${c.companyId}`);
       }
     }
-
     return res.status(200).json({ seeded: results });
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }
 });
 
-// One-time fix: patch models missing participants field
+// ── One-time fix: patch models missing participants field ──────────────────────
 app.post('/api/debug/fix-models', async (req, res) => {
   try {
     const Model          = require('./models/Models');
     const TrainingMetric = require('./models/TrainingMetric');
     const models         = await Model.find({});
     const results        = [];
+
     for (const model of models) {
       const companyIds = await TrainingMetric.find({
-        jobId: model.jobId, type: 'local'
+        jobId: model.jobId,
+        type:  'local',
       }).distinct('companyId');
+
       if (companyIds.length > 0) {
-        await Model.updateOne({ _id: model._id }, {
-          $set: { participants: companyIds, status: 'AVAILABLE' }
-        });
-        results.push(`fixed: ${model.modelId}`);
+        await Model.updateOne(
+          { _id: model._id },
+          { $set: { participants: companyIds, status: 'AVAILABLE' } }
+        );
+        results.push(`fixed: ${model.modelId} → [${companyIds.join(', ')}]`);
+      } else {
+        results.push(`skipped: ${model.modelId} (no metrics found)`);
       }
     }
-    return res.json({ done: true, results });
+
+    return res.json({ done: true, total: models.length, results });
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }
 });
+
+// ── Catch-all: serve React app for all non-API routes ─────────────────────────
 app.get('*', (req, res, next) => {
   if (req.path.startsWith('/api/') || req.path.startsWith('/health')) {
     return next();
