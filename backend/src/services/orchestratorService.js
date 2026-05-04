@@ -13,13 +13,48 @@ const weightBuffer = {};
 
 // Active round timeout timers: { [jobId]: timeoutHandle }
 const roundTimers = {};
+const TrainingMetric = require('../models/TrainingMetric');
 
-// ─── Start a new training job ─────────────────────────────────────────────────
+async function saveLocalMetric(jobId, round, companyId, metrics) {
+  try {
+    await TrainingMetric.create({
+      jobId,
+      round,
+      companyId,
+      type: 'local',
+      accuracy:    metrics.accuracy,
+      loss:        metrics.loss,
+      f1Score:     metrics.f1Score,
+      precision:   metrics.precision,
+      recall:      metrics.recall,
+      datasetSize: metrics.datasetSize,
+      epochsRun:   metrics.epochsRun,
+      durationMs:  metrics.durationMs,
+    });
+  } catch (err) {
+    console.error('[Metrics] Failed to save local metric:', err.message);
+  }
+}
 
-/**
- * Called by queueService once MIN_CLIENTS are in the queue.
- * Creates the job, moves participants in, initialises the model, starts round 1.
- */
+async function saveGlobalMetric(jobId, round, metrics) {
+  try {
+    await TrainingMetric.create({
+      jobId,
+      round,
+      companyId: 'global',
+      type: 'global',
+      accuracy:  metrics.accuracy,
+      loss:      metrics.loss,
+      f1Score:   metrics.f1Score,
+      precision: metrics.precision,
+      recall:    metrics.recall,
+    });
+  } catch (err) {
+    console.error('[Metrics] Failed to save global metric:', err.message);
+  }
+}
+
+
 async function startJob(participantIds) {
   console.log(`[Orchestrator] Starting job for participants: ${participantIds.join(', ')}`);
 
