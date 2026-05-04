@@ -8,7 +8,6 @@ import Sidebar from './components/Sidebar';
 import Dashboard from './pages/Dashboard';
 import Queue from './pages/Queue';
 import Models from './pages/Models';
-import Login from './pages/Login';
 
 function AppShell({ children }: { children: React.ReactNode }) {
   const { user, selectParticipant } = useAuth();
@@ -24,10 +23,8 @@ function AppShell({ children }: { children: React.ReactNode }) {
 }
 
 function AppRoutes() {
-  const { user } = useAuth();
   return (
     <Routes>
-      <Route path="/login"  element={user ? <Navigate to="/" replace /> : <Login />} />
       <Route path="/"       element={<AppShell><Dashboard /></AppShell>} />
       <Route path="/queue"  element={<AppShell><Queue /></AppShell>} />
       <Route path="/models" element={<AppShell><Models /></AppShell>} />
