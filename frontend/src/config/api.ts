@@ -17,15 +17,12 @@ export const apiClient = axios.create({
 apiClient.interceptors.request.use(
   (config) => {
     console.log('📤 API Request:', config.method?.toUpperCase(), config.baseURL + config.url);
-    const saved = localStorage.getItem('fl_participant'); // ← fixed key
+    const saved = localStorage.getItem('fl_participant');
     if (saved) {
       try {
         const id = JSON.parse(saved);
-        // Only send token if it's NOT a fake demo token
-        const token = `demo-token-${id}`;
-        if (!token.startsWith('demo-token-')) {
-          config.headers.Authorization = `Bearer ${token}`;
-        }
+        // Send the demo token the backend actually expects
+        config.headers.Authorization = `Bearer demo-token-${id}`;
       } catch (error) {
         console.error('Error parsing participant data:', error);
       }
