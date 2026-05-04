@@ -45,6 +45,18 @@ app.use('/health',          healthRoutes);
 app.use('/api/auth',        loginLimiter, authRoutes);
 app.use('/api/queue',       apiLimiter,   queueRoutes);
 app.use('/api/data',        apiLimiter,   dataRoutes);
+// TEMPORARY DEBUG ROUTE
+app.post('/api/debug/force-start', async (req, res) => {
+  try {
+    const queueService = require('./services/queueService');
+    await queueService.checkAndStart();
+    const state = await queueService.getQueueState();
+    return res.json({ triggered: true, state });
+  } catch (err) {
+    console.error('Force start error:', err);
+    return res.status(500).json({ error: err.message, stack: err.stack });
+  }
+});
 app.use('/api/metrics',     apiLimiter,   metricsRoutes);
 app.use('/api/training',    apiLimiter,   trainingRoutes);
 app.use('/api/models',      apiLimiter,   modelRoutes);
