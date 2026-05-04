@@ -2,15 +2,23 @@ import React, { createContext, useContext, useEffect, useState, ReactNode, useCa
 import { apiClient } from '../config/api';
 
 interface QueueNode {
-  companyId: string;
-  joinedAt:  string;
-  status:    string;
+  companyId:   string;
+  companyName?: string;
+  joinedAt:    string;
+  status:      string;
+}
+
+interface ActiveJob {
+  jobId:        string;
+  status:       string;
+  currentRound: number;
+  totalRounds:  number;
 }
 
 interface QueueState {
   count:     number;
   companies: QueueNode[];
-  activeJob: { jobId: string; status: string } | null;
+  activeJob: ActiveJob | null;
 }
 
 interface QueueContextType {
@@ -38,7 +46,12 @@ export function QueueProvider({ children }: { children: ReactNode }) {
       const res   = await apiClient.get('/api/queue');
       const nodes = res.data.participants || res.data.companies || [];
       setQueue({ ...res.data, companies: nodes });
-      setInQueue(nodes.some((c: QueueNode) => c.companyId === currentId));
+
+      // User is "in" if they appear in the node list (QUEUED or TRAINING)
+      const found = nodes.some((c: QueueNode) => c.companyId === currentId);
+      // Also mark as inQueue if active job contains them (even if DB not updated yet)
+      const inJob = res.data.activeJob?.jobId && nodes.length > 0;
+      setInQueue(found || (!!inJob && nodes.some((c: QueueNode) => c.companyId === currentId)));
     } catch (err) {
       console.error('Queue fetch error:', err);
     } finally {
@@ -48,7 +61,7 @@ export function QueueProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     refresh();
-    const interval = setInterval(refresh, 5000); // poll every 5s globally
+    const interval = setInterval(refresh, 3000); // poll every 3s for smoother round updates
     return () => clearInterval(interval);
   }, [refresh]);
 
