@@ -8,7 +8,6 @@ export default function Queue() {
   const { queue, inQueue, loading, refresh } = useQueue();
   const [joining,  setJoining]  = useState(false);
   const [leaving,  setLeaving]  = useState(false);
-  const [file,     setFile]     = useState<File | null>(null);
   const [dragOver, setDragOver] = useState(false);
 
   const currentId = (() => {
@@ -16,15 +15,35 @@ export default function Queue() {
     return saved ? JSON.parse(saved) : null;
   })();
 
+  // File selected in this session (not yet uploaded or just uploaded)
+  const [file, setFile] = useState<File | null>(null);
+
+  // Info about a previously uploaded file — persists across page navigation
+  const [uploadedInfo, setUploadedInfo] = useState<{ name: string; size: number } | null>(() => {
+    try {
+      const saved = localStorage.getItem(`fl_uploaded_${currentId}`);
+      return saved ? JSON.parse(saved) : null;
+    } catch { return null; }
+  });
+
+  const hasData = !!file || !!uploadedInfo;
+
   const joinQueue = async () => {
-    if (!file) return;
+    if (!hasData) return;
     setJoining(true);
     try {
-      const formData = new FormData();
-      formData.append('file', file);
-      await apiClient.post('/api/data/upload', formData, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-      });
+      // Only upload if a new file was selected
+      if (file) {
+        const formData = new FormData();
+        formData.append('file', file);
+        await apiClient.post('/api/data/upload', formData, {
+          headers: { 'Content-Type': 'multipart/form-data' },
+        });
+        const info = { name: file.name, size: file.size };
+        localStorage.setItem(`fl_uploaded_${currentId}`, JSON.stringify(info));
+        setUploadedInfo(info);
+      }
+
       await apiClient.post('/api/queue/join');
       await refresh();
     } catch (err: any) {
@@ -56,6 +75,13 @@ export default function Queue() {
     }
   };
 
+  const clearFile = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setFile(null);
+    setUploadedInfo(null);
+    localStorage.removeItem(`fl_uploaded_${currentId}`);
+  };
+
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setDragOver(false);
@@ -65,6 +91,7 @@ export default function Queue() {
 
   const MIN_REQUIRED = 3;
   const slotsLeft    = Math.max(0, MIN_REQUIRED - queue.count);
+  const displayName  = file ? file.name : uploadedInfo?.name;
 
   return (
     <div className="max-w-6xl mx-auto space-y-8">
@@ -127,18 +154,36 @@ export default function Queue() {
                 accept=".csv,.json,.txt"
                 onChange={(e) => e.target.files?.[0] && setFile(e.target.files[0])}
               />
-              {file ? (
-                <div className="flex items-center justify-between bg-indigo-50 rounded-xl px-4 py-3">
-                  <div className="flex items-center gap-2 text-indigo-700">
-                    <FileText size={18} />
-                    <span className="text-sm font-medium truncate max-w-[120px]">{file.name}</span>
+
+              {hasData ? (
+                <div className="space-y-2">
+                  {/* Persisted upload badge */}
+                  {uploadedInfo && !file && (
+                    <div className="flex items-center justify-center gap-2 text-emerald-700 bg-emerald-50 rounded-xl px-3 py-1.5 text-xs font-semibold">
+                      <CheckCircle2 size={13} />
+                      Previously uploaded — ready
+                    </div>
+                  )}
+                  {/* File info row */}
+                  <div className="flex items-center justify-between bg-indigo-50 rounded-xl px-4 py-3">
+                    <div className="flex items-center gap-2 text-indigo-700">
+                      <FileText size={18} />
+                      <div className="text-left">
+                        <span className="text-sm font-medium block truncate max-w-[130px]">
+                          {displayName}
+                        </span>
+                        {uploadedInfo && !file && (
+                          <span className="text-xs text-indigo-400">from previous session</span>
+                        )}
+                        {file && (
+                          <span className="text-xs text-indigo-400">ready to upload</span>
+                        )}
+                      </div>
+                    </div>
+                    <button onClick={clearFile} className="text-slate-400 hover:text-red-500 transition-colors">
+                      <X size={16} />
+                    </button>
                   </div>
-                  <button
-                    onClick={(e) => { e.stopPropagation(); setFile(null); }}
-                    className="text-slate-400 hover:text-red-500"
-                  >
-                    <X size={16} />
-                  </button>
                 </div>
               ) : (
                 <>
@@ -201,5 +246,132 @@ export default function Queue() {
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, y: -10 }}
                   onClick={joinQueue}
-                  disabled={joining || !file || !!queue.activeJob}
+                  disabled={joining || !hasData || !!queue.activeJob}
                   title={
+                    queue.activeJob ? 'Training already running — wait for next round' :
+                    !hasData ? 'Upload your data first' : ''
+                  }
+                  className="w-full bg-indigo-600 text-white py-4 rounded-2xl font-bold text-lg shadow-xl shadow-indigo-100 hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+                >
+                  {joining ? (
+                    <span className="flex items-center justify-center gap-2">
+                      <Loader2 className="animate-spin" size={20} /> Joining...
+                    </span>
+                  ) : 'Join Waiting Room'}
+                </motion.button>
+              ) : (
+                <motion.div
+                  key="waiting"
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -10 }}
+                  className="space-y-3"
+                >
+                  <div className="flex items-center justify-center gap-3 text-emerald-600 font-bold bg-emerald-50 py-4 rounded-2xl">
+                    <CheckCircle2 size={20} />
+                    You are in the queue
+                  </div>
+                  {!queue.activeJob && (
+                    <div className="flex items-center justify-center gap-2 text-slate-400 text-sm">
+                      <Loader2 className="animate-spin" size={16} />
+                      Waiting for {slotsLeft} more...
+                    </div>
+                  )}
+                  <button
+                    onClick={leaveQueue}
+                    disabled={leaving || !!queue.activeJob}
+                    className="w-full border border-red-200 text-red-500 py-3 rounded-xl text-sm font-medium hover:bg-red-50 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {leaving ? 'Leaving...' : queue.activeJob ? 'Cannot leave during training' : 'Leave Queue'}
+                  </button>
+                </motion.div>
+              )}
+            </AnimatePresence>
+
+            {!hasData && !inQueue && !queue.activeJob && (
+              <p className="text-xs text-slate-400 mt-3">⬆ Upload your data first to enable joining</p>
+            )}
+          </div>
+
+          {/* Secure Aggregation */}
+          <div className="bg-slate-900 p-6 rounded-[2rem] text-white">
+            <Shield className="text-indigo-400 mb-3" size={28} />
+            <h3 className="text-base font-bold mb-1">Secure Aggregation</h3>
+            <p className="text-slate-400 text-sm leading-relaxed">
+              Your data never leaves your device. Only model updates are shared using differential privacy.
+            </p>
+          </div>
+        </div>
+
+        {/* Connected Nodes panel */}
+        <div className="lg:col-span-2">
+          <div className="bg-white rounded-[2rem] shadow-sm border border-slate-100 overflow-hidden">
+            <div className="p-6 border-b border-slate-50 flex justify-between items-center">
+              <h2 className="text-xl font-bold text-slate-900">Connected Nodes</h2>
+              <span className="text-xs font-bold text-slate-400 uppercase tracking-widest flex items-center gap-2">
+                <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></div>
+                Live Feed
+              </span>
+            </div>
+
+            {loading ? (
+              <div className="p-12 text-center text-slate-400">
+                <Loader2 className="animate-spin mx-auto mb-3" size={24} />
+                Loading nodes...
+              </div>
+            ) : queue.companies.length === 0 ? (
+              <div className="p-12 text-center text-slate-400">
+                <Users size={40} className="mx-auto mb-3 opacity-30" />
+                <p className="font-medium">No nodes connected yet</p>
+                <p className="text-sm mt-1">Upload your data and join to be the first!</p>
+              </div>
+            ) : (
+              <div className="divide-y divide-slate-50">
+                {queue.companies.map((node, i) => (
+                  <motion.div
+                    initial={{ opacity: 0, x: -20 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    transition={{ delay: i * 0.1 }}
+                    key={node.companyId}
+                    className={`p-6 flex items-center justify-between transition-colors ${
+                      node.companyId === currentId ? 'bg-indigo-50' : 'hover:bg-slate-50'
+                    }`}
+                  >
+                    <div className="flex items-center gap-4">
+                      <div className="w-12 h-12 bg-slate-100 rounded-xl flex items-center justify-center text-slate-400">
+                        <Monitor size={24} />
+                      </div>
+                      <div>
+                        <p className="font-bold text-slate-900">
+                          {node.companyId}
+                          {node.companyId === currentId && (
+                            <span className="ml-2 text-xs text-indigo-500 font-normal">(you)</span>
+                          )}
+                        </p>
+                        <p className="text-xs text-slate-500 font-medium">
+                          Joined {new Date(node.joinedAt).toLocaleTimeString()}
+                        </p>
+                      </div>
+                    </div>
+                    <div className={`flex items-center gap-2 px-3 py-1 rounded-lg text-xs font-bold uppercase tracking-wider ${
+                      queue.activeJob ? 'bg-indigo-50 text-indigo-600' : 'bg-emerald-50 text-emerald-600'
+                    }`}>
+                      <div className={`w-1.5 h-1.5 rounded-full animate-pulse ${
+                        queue.activeJob ? 'bg-indigo-500' : 'bg-emerald-500'
+                      }`}></div>
+                      {queue.activeJob ? 'training' : (node.status || 'ready')}
+                    </div>
+                  </motion.div>
+                ))}
+              </div>
+            )}
+
+            <div className="p-4 bg-slate-50 text-center text-xs text-slate-400">
+              {queue.companies.length} of {queue.count} nodes shown · refreshes every 5s
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
