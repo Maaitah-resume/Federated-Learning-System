@@ -2,7 +2,7 @@
 const Participant   = require('../models/Participant');
 const Company       = require('../models/Company');
 const UserData      = require('../models/UserData');
-const jobManager    = require('./jobManager');
+const jobManager    = require('./simulatedOrchestrator');  // simulated version exposes getActiveJob
 const emitter       = require('../websocket/eventEmitter');
 const { PARTICIPANT_STATUS, WS_EVENTS } = require('../config/constants');
 const { MIN_CLIENTS, DEFAULT_ROUNDS }   = require('../config/env');
@@ -167,7 +167,7 @@ async function checkAndStart() {
 
     // Delegate job creation + orchestration to the orchestrator
     // (imported lazily to avoid circular dependency)
-    const orchestratorService = require('./orchestratorService');
+    const orchestratorService = require('./simulatedOrchestrator');
     await orchestratorService.startJob(participantIds);
 
   } catch (err) {
