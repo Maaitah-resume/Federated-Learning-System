@@ -107,22 +107,28 @@ async function runRounds(jobId, participantIds, totalRounds) {
   // Get final metrics
   const finalGlobal = await TrainingMetric.findOne({ jobId, type: 'global' }).sort({ round: -1 });
 
-  // Save model record using correct schema fields
-  await Model.create({
-    modelId:  `model-${jobId}`,
-    jobId,
-    version:  '1.0.0',
-    status:   'AVAILABLE',
-    architecture: 'IDSNet_v2',
-    trainingMetrics: {
-      finalAccuracy:     finalGlobal?.accuracy     || 0,
-      finalLoss:         finalGlobal?.loss         || 0,
-      roundsCompleted:   totalRounds,
-      totalParticipants: participantIds.length,
-    },
-    artifactPath: `/models/${jobId}/global_model.pt`,
-    sizeBytes:    1024 * 1024 * 4, // simulated 4MB
-  }).catch((err) => console.error('[SimOrchestrator] Model save error:', err.message));
+  // Save model — participants field is critical for per-user access
+  try {
+    await Model.create({
+      modelId:      `model-${jobId}`,
+      jobId,
+      version:      '1.0.0',
+      status:       'AVAILABLE',
+      architecture: 'IDSNet_v2',
+      participants: participantIds,          // ← who can access this model
+      sizeBytes:    1024 * 1024 * 4,         // simulated 4MB
+      artifactPath: `/models/${jobId}/global_model.pt`,
+      trainingMetrics: {
+        finalAccuracy:     finalGlobal?.accuracy || 0,
+        finalLoss:         finalGlobal?.loss     || 0,
+        roundsCompleted:   totalRounds,
+        totalParticipants: participantIds.length,
+      },
+    });
+    console.log(`[SimOrchestrator] Model saved for job ${jobId} — participants: [${participantIds.join(', ')}]`);
+  } catch (err) {
+    console.error('[SimOrchestrator] Model save error:', err.message);
+  }
 
   // Reset participants to DONE
   await Participant.updateMany(
