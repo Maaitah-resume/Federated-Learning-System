@@ -49,17 +49,26 @@ export default function Queue() {
     return () => clearInterval(interval);
   }, [fetchQueue]);
 
-  const joinQueue = async () => {
-    setJoining(true);
-    try {
-      await apiClient.post('/api/queue/join');
-      await fetchQueue();
-    } catch (err) {
-      console.error('Join queue error:', err);
-    } finally {
-      setJoining(false);
-    }
-  };
+const joinQueue = async () => {
+  if (!file) return;
+  setJoining(true);
+  try {
+    // Upload data first
+    const formData = new FormData();
+    formData.append('file', file);
+    await apiClient.post('/api/data/upload', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+    // Then join the queue
+    await apiClient.post('/api/queue/join');
+    await fetchQueue();
+  } catch (err: any) {
+    console.error('Join queue error:', err);
+    alert(err.response?.data?.error?.message || 'Failed to join queue');
+  } finally {
+    setJoining(false);
+  }
+};
 
   const leaveQueue = async () => {
     setLeaving(true);
