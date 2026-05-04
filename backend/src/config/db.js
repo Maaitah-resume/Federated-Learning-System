@@ -1,21 +1,18 @@
-import mongoose from 'mongoose';
-import { env } from './env.js';
+const mongoose = require('mongoose');
+const { env }  = require('./env');
 
-export const connectDB = async () => {
+const connectDB = async () => {
   try {
     if (!env.MONGODB_URI) {
       console.warn('MONGODB_URI is not configured. Database connection skipped.');
       return;
     }
-    
     const conn = await mongoose.connect(env.MONGODB_URI);
     console.log(`MongoDB Connected: ${conn.connection.host}`);
   } catch (error) {
-    if (error instanceof Error) {
-      console.error(`Error: ${error.message}`);
-    } else {
-      console.error('An unknown error occurred during DB connection');
-    }
+    console.error('Error:', error.message);
     process.exit(1);
   }
 };
+
+module.exports = { connectDB };
