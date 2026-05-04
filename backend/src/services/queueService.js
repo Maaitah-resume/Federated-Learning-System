@@ -9,25 +9,35 @@ const { MIN_CLIENTS }    = require('../config/env');
 let isStartingJob = false;
 
 async function getQueueState() {
-  const queued = await Participant.find({ status: PARTICIPANT_STATUS.QUEUED, jobId: null });
+  const activeJob = simulatedOrch.getActiveJob();
 
-  const companyIds = queued.map((p) => p.companyId);
+  // Show QUEUED participants when idle, TRAINING participants when job is running
+  const statusFilter = activeJob
+    ? { status: PARTICIPANT_STATUS.TRAINING, jobId: activeJob.jobId }
+    : { status: PARTICIPANT_STATUS.QUEUED, jobId: null };
+
+  const participants = await Participant.find(statusFilter);
+
+  const companyIds = participants.map((p) => p.companyId);
   const companies  = await Company.find({ companyId: { $in: companyIds } }).select('companyId companyName');
   const nameMap    = Object.fromEntries(companies.map((c) => [c.companyId, c.companyName]));
 
-  const activeJob = simulatedOrch.getActiveJob();
-
   return {
-    participants: queued.map((p) => ({
+    participants: participants.map((p) => ({
       companyId:   p.companyId,
       companyName: nameMap[p.companyId] || p.companyId,
       joinedAt:    p.joinedQueueAt,
       status:      p.status,
     })),
-    count:        queued.length,
+    count:        participants.length,
     minRequired:  MIN_CLIENTS || 3,
-    readyToStart: queued.length >= (MIN_CLIENTS || 3),
-    activeJob:    activeJob ? { jobId: activeJob.jobId, status: activeJob.status } : null,
+    readyToStart: participants.length >= (MIN_CLIENTS || 3),
+    activeJob: activeJob ? {
+      jobId:        activeJob.jobId,
+      status:       activeJob.status,
+      currentRound: activeJob.currentRound || 0,
+      totalRounds:  activeJob.totalRounds  || 10,
+    } : null,
   };
 }
 
@@ -108,8 +118,8 @@ async function checkAndStart() {
   console.log(`[Queue] Threshold reached (${count}/${minClients}) — starting job`);
 
   try {
-    const participants    = await Participant.find({ status: PARTICIPANT_STATUS.QUEUED, jobId: null }).limit(minClients);
-    const participantIds  = participants.map((p) => p.companyId);
+    const participants   = await Participant.find({ status: PARTICIPANT_STATUS.QUEUED, jobId: null }).limit(minClients);
+    const participantIds = participants.map((p) => p.companyId);
     await simulatedOrch.startJob(participantIds);
   } catch (err) {
     console.error('[Queue] Failed to start job:', err.message);
