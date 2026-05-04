@@ -28,8 +28,9 @@ export default function Queue() {
       setQueue(res.data);
 
       // Check if current user (observer) is in queue
-      const inQ = res.data.companies?.some((c: QueueNode) => c.companyId === 'observer');
-      setInQueue(inQ);
+    const nodes = res.data.participants || res.data.companies || [];
+const inQ = nodes.some((c: QueueNode) => c.companyId === 'observer');
+setQueue({ ...res.data, companies: nodes });
     } catch (err) {
       console.error('Queue fetch error:', err);
     } finally {
