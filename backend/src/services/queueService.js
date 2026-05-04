@@ -1,6 +1,7 @@
 // src/services/queueService.js
 const Participant   = require('../models/Participant');
 const Company       = require('../models/Company');
+const UserData      = require('../models/UserData');
 const jobManager    = require('./jobManager');
 const emitter       = require('../websocket/eventEmitter');
 const { PARTICIPANT_STATUS, WS_EVENTS } = require('../config/constants');
@@ -14,19 +15,6 @@ let isStartingJob = false;
 /**
  * Returns the current queue state — list of waiting companies + metadata.
  */
-async function joinQueue(companyId) {
-  // NEW: Require uploaded data before joining
-  const UserData = require('../models/UserData');
-  const userData = await UserData.findOne({ companyId });
-  if (!userData) {
-    throw Object.assign(new Error('Please upload your data before joining the queue'), {
-      status: 400,
-      code:   'NO_DATA_UPLOADED',
-    });
-  }
-
-  // ... existing code below stays the same
-
 async function getQueueState() {
   const queued = await Participant.find({
     status: PARTICIPANT_STATUS.QUEUED,
@@ -44,6 +32,7 @@ async function getQueueState() {
       companyId:   p.companyId,
       companyName: nameMap[p.companyId] || p.companyId,
       joinedAt:    p.joinedQueueAt,
+      status:      p.status,
     })),
     count:        queued.length,
     minRequired:  MIN_CLIENTS,
@@ -56,9 +45,18 @@ async function getQueueState() {
 /**
  * Adds a company to the queue.
  * Returns the updated queue state.
- * Throws if already queued or already in an active job.
+ * Throws if no data uploaded, already queued, or already in an active job.
  */
 async function joinQueue(companyId) {
+  // Require uploaded data before joining
+  const userData = await UserData.findOne({ companyId });
+  if (!userData) {
+    throw Object.assign(new Error('Please upload your data before joining the queue'), {
+      status: 400,
+      code:   'NO_DATA_UPLOADED',
+    });
+  }
+
   // Already in queue?
   const existing = await Participant.findOne({
     companyId,
