@@ -2,6 +2,7 @@ import React from 'react';
 import { NavLink } from 'react-router-dom';
 import { LayoutDashboard, Users, Database, LogOut, Activity } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { useQueue } from '../context/QueueContext';
 import { cn } from '../lib/utils';
 
 const navItems = [
@@ -12,6 +13,8 @@ const navItems = [
 
 export default function Sidebar() {
   const { user, logout } = useAuth();
+  const { inQueue, queue } = useQueue();
+
   return (
     <aside className="w-64 bg-slate-900 text-slate-300 flex flex-col h-screen sticky top-0 border-r border-slate-800">
       <div className="p-6">
@@ -38,12 +41,28 @@ export default function Sidebar() {
               )}
             >
               <item.icon size={20} className="transition-colors group-hover:text-indigo-400" />
-              <span className="font-medium">{item.label}</span>
+              <span className="font-medium flex-1">{item.label}</span>
+              {item.path === '/queue' && inQueue && (
+                <span className="text-xs bg-emerald-500 text-white px-2 py-0.5 rounded-full font-bold animate-pulse">
+                  {queue.count}
+                </span>
+              )}
             </NavLink>
           ))}
         </nav>
       </div>
+
       <div className="mt-auto p-6 border-t border-slate-800">
+        {inQueue && (
+          <div className="mb-4 p-3 bg-emerald-500/10 border border-emerald-500/20 rounded-xl">
+            <div className="flex items-center gap-2 text-emerald-400 text-xs font-bold mb-1">
+              <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></div>
+              IN QUEUE
+            </div>
+            <p className="text-xs text-slate-400">Waiting for {queue.count} / 3 participants</p>
+          </div>
+        )}
+
         <div className="flex items-center gap-3 mb-6 px-2">
           <div className="w-8 h-8 rounded-full bg-slate-700 flex items-center justify-center text-xs font-bold text-white">
             {user?.company?.[0] || 'U'}
