@@ -102,7 +102,7 @@ export default function ParticipantPicker({ onSelect }: Props) {
             {/* Email */}
             <div className="space-y-2">
               <label className="text-xs font-bold text-slate-500 uppercase tracking-widest ml-1">
-                University Email
+                Email
               </label>
               <div className="relative group">
                 <Mail
@@ -111,7 +111,7 @@ export default function ParticipantPicker({ onSelect }: Props) {
                 />
                 <input
                   type="email"
-                  placeholder="your@htu.edu.jo"
+                  placeholder="Enter your email"
                   className="w-full pl-12 pr-4 py-3.5 bg-slate-800/60 border border-slate-700 rounded-2xl text-white placeholder:text-slate-600 focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all outline-none text-sm"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
