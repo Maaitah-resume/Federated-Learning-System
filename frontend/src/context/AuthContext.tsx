@@ -10,32 +10,64 @@ interface User {
 
 interface AuthContextType {
   user:      User | null;
+  selectParticipant: (participantId: string) => void;
   logout:    () => void;
   isLoading: boolean;
   error:     string | null;
 }
 
-// Demo user — token format must match backend: "demo-token-<companyId>"
-// Backend authMiddleware looks up Company where companyId = "observer"
-const DEMO_USER: User = {
-  company:   'FL Observer',
-  companyId: 'observer',
-  email:     'observer@fedlearning.com',
-  token:     'demo-token-observer',  // ← backend accepts this format
-  role:      'client',
+const PARTICIPANT_PROFILES: Record<string, User> = {
+  alpha: {
+    company:   'Participant Alpha',
+    companyId: 'alpha',
+    email:     'alpha@demo.com',
+    token:     'demo-token-alpha',
+    role:      'client',
+  },
+  beta: {
+    company:   'Participant Beta',
+    companyId: 'beta',
+    email:     'beta@demo.com',
+    token:     'demo-token-beta',
+    role:      'client',
+  },
+  gamma: {
+    company:   'Participant Gamma',
+    companyId: 'gamma',
+    email:     'gamma@demo.com',
+    token:     'demo-token-gamma',
+    role:      'client',
+  },
 };
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [user] = useState<User | null>(DEMO_USER);
-  const [isLoading] = useState(false);
-  const [error]     = useState<string | null>(null);
+  const [user, setUser] = useState<User | null>(() => {
+    // Restore from localStorage on page refresh
+    const saved = localStorage.getItem('fl_participant');
+    if (saved) {
+      const id = JSON.parse(saved);
+      return PARTICIPANT_PROFILES[id] || null;
+    }
+    return null;
+  });
 
-  const logout = () => window.location.reload();
+  const selectParticipant = (participantId: string) => {
+    const profile = PARTICIPANT_PROFILES[participantId];
+    if (profile) {
+      setUser(profile);
+      localStorage.setItem('fl_participant', JSON.stringify(participantId));
+    }
+  };
+
+  const logout = () => {
+    setUser(null);
+    localStorage.removeItem('fl_participant');
+  };
 
   return (
-    <AuthContext.Provider value={{ user, logout, isLoading, error }}>
+    <AuthContext.Provider value={{ user, selectParticipant, logout, isLoading: false, error: null }}>
       {children}
     </AuthContext.Provider>
   );
