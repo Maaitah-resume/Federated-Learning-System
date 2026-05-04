@@ -1,7 +1,8 @@
 import React from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
-import { AuthProvider } from './context/AuthContext';
+import { AuthProvider, useAuth } from './context/AuthContext';
 import { SocketProvider } from './context/SocketContext';
+import ParticipantPicker from './components/ParticipantPicker';
 import Sidebar from './components/Sidebar';
 import Dashboard from './pages/Dashboard';
 import TrainingControl from './pages/TrainingControl';
@@ -9,8 +10,14 @@ import Training from './pages/Training';
 import Queue from './pages/Queue';
 import Models from './pages/Models';
 
-// No login required - direct access to all pages
-function Layout({ children }: { children: React.ReactNode }) {
+function AppShell({ children }: { children: React.ReactNode }) {
+  const { user, selectParticipant } = useAuth();
+
+  // First visit: show participant picker (no login, just pick your ID)
+  if (!user) {
+    return <ParticipantPicker onSelect={selectParticipant} />;
+  }
+
   return (
     <div className="flex min-h-screen bg-slate-50 font-sans text-slate-900">
       <Sidebar />
@@ -24,12 +31,12 @@ function Layout({ children }: { children: React.ReactNode }) {
 function AppRoutes() {
   return (
     <Routes>
-      <Route path="/"         element={<Layout><Dashboard /></Layout>} />
-      <Route path="/control"  element={<Layout><TrainingControl /></Layout>} />
-      <Route path="/training" element={<Layout><Training /></Layout>} />
-      <Route path="/queue"    element={<Layout><Queue /></Layout>} />
-      <Route path="/models"   element={<Layout><Models /></Layout>} />
-      <Route path="/settings" element={<Layout><div className="p-10 text-slate-400">Settings page coming soon...</div></Layout>} />
+      <Route path="/"         element={<AppShell><Dashboard /></AppShell>} />
+      <Route path="/control"  element={<AppShell><TrainingControl /></AppShell>} />
+      <Route path="/training" element={<AppShell><Training /></AppShell>} />
+      <Route path="/queue"    element={<AppShell><Queue /></AppShell>} />
+      <Route path="/models"   element={<AppShell><Models /></AppShell>} />
+      <Route path="/settings" element={<AppShell><div className="p-10 text-slate-400">Settings coming soon...</div></AppShell>} />
       <Route path="*"         element={<Navigate to="/" replace />} />
     </Routes>
   );
