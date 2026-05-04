@@ -54,6 +54,9 @@ export default function Queue() {
     if (dropped) setFile(dropped);
   };
 
+  const MIN_REQUIRED = 3;
+  const slotsLeft = Math.max(0, MIN_REQUIRED - queue.count);
+
   return (
     <div className="max-w-6xl mx-auto space-y-8">
       <header>
@@ -61,9 +64,39 @@ export default function Queue() {
         <p className="text-slate-500 mt-1">Upload your private data and join the federated learning cluster.</p>
       </header>
 
+      {/* Global training-active banner */}
+      <AnimatePresence>
+        {queue.activeJob && (
+          <motion.div
+            initial={{ opacity: 0, y: -20 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -20 }}
+            className="bg-gradient-to-r from-indigo-600 to-emerald-600 p-6 rounded-3xl text-white shadow-xl shadow-indigo-100"
+          >
+            <div className="flex items-center gap-4">
+              <div className="w-12 h-12 bg-white/20 backdrop-blur rounded-2xl flex items-center justify-center">
+                <Loader2 className="animate-spin" size={24} />
+              </div>
+              <div className="flex-1">
+                <h3 className="font-bold text-lg">🚀 Federated Training in Progress</h3>
+                <p className="text-sm text-white/80">
+                  Job <span className="font-mono">{queue.activeJob.jobId.slice(0, 8)}</span> · Status:{' '}
+                  <span className="font-bold uppercase">{queue.activeJob.status}</span>
+                </p>
+              </div>
+              <div className="text-right">
+                <p className="text-xs text-white/70 uppercase tracking-widest">Participants</p>
+                <p className="text-2xl font-black">{queue.count}</p>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
         <div className="lg:col-span-1 space-y-6">
 
+          {/* Step 1: Upload */}
           <div className="bg-white p-6 rounded-[2rem] shadow-sm border border-slate-100">
             <div className="flex items-center gap-3 mb-4">
               <div className="w-8 h-8 rounded-full bg-indigo-600 text-white flex items-center justify-center text-sm font-bold">1</div>
@@ -105,6 +138,7 @@ export default function Queue() {
             </div>
           </div>
 
+          {/* Step 2: Join Queue */}
           <div className="bg-white p-6 rounded-[2rem] shadow-sm border border-slate-100 text-center relative overflow-hidden">
             <div className="absolute top-0 left-0 w-full h-1 bg-indigo-600"></div>
             <div className="flex items-center gap-3 mb-4">
@@ -118,14 +152,32 @@ export default function Queue() {
               animate={{ scale: 1,   color: '#0f172a' }}
               className="text-5xl font-black mb-1"
             >
-              {loading ? '...' : queue.count}
+              {loading ? '...' : `${queue.count} / ${MIN_REQUIRED}`}
             </motion.p>
             <p className="text-slate-500 font-medium uppercase tracking-widest text-xs mb-4">Active Participants</p>
 
-            {queue.activeJob && (
-              <div className="mb-4 px-3 py-1 bg-emerald-50 text-emerald-600 rounded-lg text-xs font-bold inline-block">
-                Training {queue.activeJob.status}
+            {/* Auto-start hint */}
+            {!queue.activeJob && inQueue && slotsLeft > 0 && (
+              <div className="mb-4 p-2 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-700 font-medium">
+                Need {slotsLeft} more {slotsLeft === 1 ? 'participant' : 'participants'} to auto-start training
               </div>
+            )}
+
+            {/* Inline training-started badge */}
+            {queue.activeJob && (
+              <motion.div
+                initial={{ opacity: 0, scale: 0.9 }}
+                animate={{ opacity: 1, scale: 1 }}
+                className="mb-4 p-3 bg-gradient-to-r from-emerald-50 to-indigo-50 border border-emerald-200 rounded-xl"
+              >
+                <div className="flex items-center justify-center gap-2 text-emerald-700 font-bold text-sm mb-1">
+                  <Loader2 className="animate-spin" size={14} />
+                  Training Started!
+                </div>
+                <p className="text-xs text-slate-600">
+                  Job <span className="font-mono">{queue.activeJob.jobId.slice(0, 8)}</span> · <span className="font-bold uppercase">{queue.activeJob.status}</span>
+                </p>
+              </motion.div>
             )}
 
             <AnimatePresence mode="wait">
@@ -136,8 +188,11 @@ export default function Queue() {
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, y: -10 }}
                   onClick={joinQueue}
-                  disabled={joining || !file}
-                  title={!file ? 'Upload your data first' : ''}
+                  disabled={joining || !file || !!queue.activeJob}
+                  title={
+                    queue.activeJob ? 'Training already running — wait for next round' :
+                    !file ? 'Upload your data first' : ''
+                  }
                   className="w-full bg-indigo-600 text-white py-4 rounded-2xl font-bold text-lg shadow-xl shadow-indigo-100 hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
                 >
                   {joining ? (
@@ -158,26 +213,29 @@ export default function Queue() {
                     <CheckCircle2 size={20} />
                     You are in the queue
                   </div>
-                  <div className="flex items-center justify-center gap-2 text-slate-400 text-sm">
-                    <Loader2 className="animate-spin" size={16} />
-                    Waiting for training to start...
-                  </div>
+                  {!queue.activeJob && (
+                    <div className="flex items-center justify-center gap-2 text-slate-400 text-sm">
+                      <Loader2 className="animate-spin" size={16} />
+                      Waiting for {slotsLeft} more...
+                    </div>
+                  )}
                   <button
                     onClick={leaveQueue}
-                    disabled={leaving}
-                    className="w-full border border-red-200 text-red-500 py-3 rounded-xl text-sm font-medium hover:bg-red-50 transition-all disabled:opacity-50"
+                    disabled={leaving || !!queue.activeJob}
+                    className="w-full border border-red-200 text-red-500 py-3 rounded-xl text-sm font-medium hover:bg-red-50 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                   >
-                    {leaving ? 'Leaving...' : 'Leave Queue'}
+                    {leaving ? 'Leaving...' : queue.activeJob ? 'Cannot leave during training' : 'Leave Queue'}
                   </button>
                 </motion.div>
               )}
             </AnimatePresence>
 
-            {!file && !inQueue && (
+            {!file && !inQueue && !queue.activeJob && (
               <p className="text-xs text-slate-400 mt-3">⬆ Upload your data first to enable joining</p>
             )}
           </div>
 
+          {/* Secure Aggregation info */}
           <div className="bg-slate-900 p-6 rounded-[2rem] text-white">
             <Shield className="text-indigo-400 mb-3" size={28} />
             <h3 className="text-base font-bold mb-1">Secure Aggregation</h3>
@@ -187,6 +245,7 @@ export default function Queue() {
           </div>
         </div>
 
+        {/* Connected Nodes panel */}
         <div className="lg:col-span-2">
           <div className="bg-white rounded-[2rem] shadow-sm border border-slate-100 overflow-hidden">
             <div className="p-6 border-b border-slate-50 flex justify-between items-center">
@@ -236,9 +295,13 @@ export default function Queue() {
                         </p>
                       </div>
                     </div>
-                    <div className="flex items-center gap-2 px-3 py-1 bg-emerald-50 text-emerald-600 rounded-lg text-xs font-bold uppercase tracking-wider">
-                      <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></div>
-                      {node.status || 'ready'}
+                    <div className={`flex items-center gap-2 px-3 py-1 rounded-lg text-xs font-bold uppercase tracking-wider ${
+                      queue.activeJob ? 'bg-indigo-50 text-indigo-600' : 'bg-emerald-50 text-emerald-600'
+                    }`}>
+                      <div className={`w-1.5 h-1.5 rounded-full animate-pulse ${
+                        queue.activeJob ? 'bg-indigo-500' : 'bg-emerald-500'
+                      }`}></div>
+                      {queue.activeJob ? 'training' : (node.status || 'ready')}
                     </div>
                   </motion.div>
                 ))}
