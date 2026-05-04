@@ -4,61 +4,59 @@ const { authenticate } = require('../middleware/authMiddleware');
 
 const router = express.Router();
 
-// GET /api/metrics/current — metrics for the active job (or latest)
+// GET /api/metrics/current
 router.get('/current', authenticate, async (req, res, next) => {
   try {
-    // Find the most recent jobId
-    const latest = await TrainingMetric.findOne().sort({ createdAt: -1 });
-    if (!latest) return res.status(200).json({ jobId: null, rounds: [], localMetrics: [] });
+    const myCompanyId = req.company.companyId;
 
-    const jobId = latest.jobId;
+    // Find the most recent job this user participated in
+    const myLatest = await TrainingMetric.findOne({
+      companyId: myCompanyId,
+      type: 'local',
+    }).sort({ createdAt: -1 });
 
-    // Global metrics per round (for charts)
+    if (!myLatest) {
+      return res.status(200).json({ jobId: null, rounds: [], myMetrics: [] });
+    }
+
+    const jobId = myLatest.jobId;
+
+    // Global metrics per round (shared — safe to show)
     const rounds = await TrainingMetric.find({ jobId, type: 'global' })
       .sort({ round: 1 })
       .select('round accuracy loss f1Score precision recall createdAt');
 
-    // Latest local metrics from each participant (current round)
-    const maxRound = Math.max(...rounds.map(r => r.round), 0);
-    const localMetrics = await TrainingMetric.find({
+    // Only THIS user's local metrics — never other participants
+    const myMetrics = await TrainingMetric.find({
       jobId,
       type: 'local',
-      round: maxRound,
-    }).select('companyId accuracy loss datasetSize durationMs');
+      companyId: myCompanyId,
+    })
+      .sort({ round: 1 })
+      .select('round accuracy loss datasetSize durationMs epochsRun');
 
-    return res.status(200).json({ jobId, rounds, localMetrics });
+    const maxRound = rounds.length > 0 ? rounds[rounds.length - 1].round : 0;
+
+    return res.status(200).json({ jobId, rounds, myMetrics, maxRound });
   } catch (err) { next(err); }
 });
 
-// GET /api/metrics/:jobId — full history for a specific job
+// GET /api/metrics/:jobId — full history for a job (own metrics only)
 router.get('/:jobId', authenticate, async (req, res, next) => {
   try {
+    const myCompanyId = req.company.companyId;
     const { jobId } = req.params;
+
     const rounds = await TrainingMetric.find({ jobId, type: 'global' })
       .sort({ round: 1 });
-    const localMetrics = await TrainingMetric.find({ jobId, type: 'local' })
-      .sort({ round: 1 });
-    return res.status(200).json({ jobId, rounds, localMetrics });
-  } catch (err) { next(err); }
-});
 
-// GET /api/metrics — list all completed jobs with their final metrics
-router.get('/', authenticate, async (req, res, next) => {
-  try {
-    const jobs = await TrainingMetric.aggregate([
-      { $match: { type: 'global' } },
-      { $sort: { round: -1 } },
-      { $group: {
-          _id: '$jobId',
-          finalRound:    { $first: '$round' },
-          finalAccuracy: { $first: '$accuracy' },
-          finalLoss:     { $first: '$loss' },
-          completedAt:   { $first: '$createdAt' },
-      }},
-      { $sort: { completedAt: -1 } },
-      { $limit: 10 },
-    ]);
-    return res.status(200).json({ jobs });
+    const myMetrics = await TrainingMetric.find({
+      jobId,
+      type: 'local',
+      companyId: myCompanyId,
+    }).sort({ round: 1 });
+
+    return res.status(200).json({ jobId, rounds, myMetrics });
   } catch (err) { next(err); }
 });
 
