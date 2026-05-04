@@ -1,196 +1,104 @@
-# fl_server/api/routes/training.py
-import os
-from fastapi import APIRouter, HTTPException
+# Add these imports at the top:
+from core.data_engineer import analyze_csv
+from core.schema_store import schema_store
+from core.local_trainer import train_local
+import base64
 
-from api.schemas.requests  import (
-    InitializeRequest, DistributeRequest,
-    ReceiveWeightsRequest, AggregateRequest, FinalizeRequest,
-)
-from api.schemas.responses import (
-    InitializeResponse, DistributeResponse,
-    ReceiveWeightsResponse, AggregateResponse,
-    AggregationMetrics, FinalizeResponse, StatusResponse,
-)
-from core.round_controller import round_controller
-from core.weight_store     import weight_store
-from core.aggregator       import (
-    aggregate, compute_metrics,
-    get_trust_scores, AGGREGATION_MODE,
-)
-from core.model_manager    import (
-    deserialize_weights, serialize_weights, save_model_to_disk,
-)
-
-router    = APIRouter(prefix="/fl")
-MODEL_DIR = os.environ.get("MODEL_STORE_PATH", "./models")
-
-
-# ── POST /fl/initialize ────────────────────────────────────────────────────────
-
-@router.post("/initialize", response_model=InitializeResponse)
-def initialize(req: InitializeRequest):
-    """Creates a fresh global model for a new training job."""
-    result = round_controller.initialize(req.job_id, req.model_version)
-    return InitializeResponse(**result)
-
-
-# ── POST /fl/distribute ────────────────────────────────────────────────────────
-
-@router.post("/distribute", response_model=DistributeResponse)
-def distribute(req: DistributeRequest):
-    """Returns current global model weights for a round."""
-    weights_b64 = round_controller.get_weights_b64(req.job_id)
-    if weights_b64 is None:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Job {req.job_id} not found. Call /fl/initialize first.",
-        )
-    return DistributeResponse(
-        round_model_b64=weights_b64,
-        round_id=f"{req.job_id}_round_{req.round}",
-    )
-
-
-# ── POST /fl/receive-weights ──────────────────────────────────────────────────
-
-@router.post("/receive-weights", response_model=ReceiveWeightsResponse)
-def receive_weights(req: ReceiveWeightsRequest):
+# REPLACE the /fl/initialize endpoint with this version:
+@router.post("/initialize")
+def initialize(req: dict):
     """
-    Buffers one company's weight update.
-    Accepts both masked (hybrid mode) and raw (meta/fedavg mode) weights.
-    Stores validation_loss for meta-aggregator adaptive scoring.
+    Smart initialize: if first participant's CSV is provided, auto-detects schema.
+    Otherwise uses default schema (assumes 25 features).
     """
+    job_id        = req.get('job_id')
+    model_version = req.get('model_version', 'IDSNet_v2')
+    sample_csv_b64 = req.get('sample_csv_b64')  # NEW: optional CSV for schema detection
+
+    if not job_id:
+        raise HTTPException(status_code=400, detail='job_id required')
+
+    # Auto-detect schema from sample CSV if provided
+    if sample_csv_b64:
+        try:
+            csv_bytes = base64.b64decode(sample_csv_b64.encode())
+            schema    = analyze_csv(csv_bytes)
+            schema_store.set(job_id, schema)
+            print(f"[Initialize] Schema detected: {schema['input_dim']} features, "
+                  f"target='{schema['target_col']}', "
+                  f"binary={schema['is_binary']}, "
+                  f"classes={schema['target_unique']}")
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f'Schema analysis failed: {e}')
+    else:
+        # Default schema (25 features, binary)
+        schema = {'input_dim': 25, 'output_dim': 1, 'is_binary': True}
+        schema_store.set(job_id, schema)
+
+    # Build model with detected dimensions
+    from models.ids_model import build_model
+    from core.model_manager import serialize_weights, count_parameters
+
+    model      = build_model(input_dim=schema['input_dim'], output_dim=schema['output_dim'])
+    state_dict = model.state_dict()
+
+    round_controller._jobs[job_id] = {
+        'state_dict':    state_dict,
+        'model_version': model_version,
+        'current_round': 0,
+    }
+
+    return {
+        'weights_b64':        serialize_weights(state_dict),
+        'model_architecture': model_version,
+        'num_params':         count_parameters(model),
+        'schema':             {
+            'input_dim':  schema['input_dim'],
+            'output_dim': schema['output_dim'],
+            'is_binary':  schema['is_binary'],
+            'target_col': schema.get('target_col'),
+            'features':   schema.get('numerical_cols', []) + schema.get('categorical_cols', []),
+        },
+    }
+
+
+# REPLACE the /fl/train-local endpoint:
+@router.post("/train-local")
+def train_local_endpoint(req: dict):
+    job_id             = req.get('job_id')
+    company_id         = req.get('company_id')
+    round_num          = req.get('round', 1)
+    global_weights_b64 = req.get('global_weights_b64')
+    csv_data_b64       = req.get('csv_data_b64')
+    epochs             = req.get('epochs', 3)
+
+    if not all([job_id, company_id, global_weights_b64, csv_data_b64]):
+        raise HTTPException(status_code=400, detail='Missing required fields')
+
+    # Get the job's schema (must have been set by /fl/initialize)
+    schema = schema_store.get(job_id)
+    if not schema:
+        raise HTTPException(status_code=400, detail=f'No schema for job {job_id}. Call /fl/initialize first.')
+
     try:
-        state_dict = deserialize_weights(req.weights_b64)
+        csv_bytes = base64.b64decode(csv_data_b64.encode())
+        result    = train_local(global_weights_b64, csv_bytes, schema, epochs=epochs)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Invalid weights payload: {e}")
+        raise HTTPException(status_code=500, detail=f'Local training failed: {str(e)}')
 
+    state_dict = deserialize_weights(result['weights_b64'])
     weight_store.store(
-        job_id=req.job_id,
-        round_number=req.round,
-        company_id=req.company_id,
-        weights=state_dict,
-        dataset_size=req.dataset_size,
-        validation_loss=req.validation_loss,   # NEW: passed to meta-aggregator
-    )
-
-    submitted = weight_store.count(req.job_id, req.round)
-
-    return ReceiveWeightsResponse(received=True, waiting_for=max(0, 0))
-
-
-# ── POST /fl/aggregate ────────────────────────────────────────────────────────
-
-@router.post("/aggregate", response_model=AggregateResponse)
-def run_aggregate(req: AggregateRequest):
-    """
-    Runs the configured aggregation algorithm on all buffered updates.
-
-    Supports three modes via AGGREGATION_MODE env var (or per-request override):
-      hybrid  — pairwise mask cancellation + meta-weighted average (default)
-      meta    — adaptive meta-weighting on raw weights, no masking
-      fedavg  — original FedAvg, dataset-size weighted average
-
-    Returns the new global model weights and per-client α scores.
-    """
-    updates = weight_store.get_all(req.job_id, req.round)
-
-    if not updates:
-        raise HTTPException(
-            status_code=400,
-            detail=f"No weights found for job {req.job_id} round {req.round}.",
-        )
-
-    # Allow per-request mode override (useful for A/B testing rounds)
-    mode = req.mode_override or AGGREGATION_MODE
-    if req.mode_override:
-        # Temporarily patch the env var so aggregate() uses the override
-        original = os.environ.get("AGGREGATION_MODE", "hybrid")
-        os.environ["AGGREGATION_MODE"] = req.mode_override
-
-    # Snapshot global weights BEFORE aggregation (for delta metrics)
-    before_state = round_controller.get_state_dict(req.job_id) or {}
-
-    try:
-        # ── Core aggregation call — dispatches to hybrid / meta / fedavg ─────
-        aggregated = aggregate(updates, round_number=req.round)
-    finally:
-        if req.mode_override:
-            os.environ["AGGREGATION_MODE"] = original
-
-    # Update global model in memory
-    round_controller.update_weights(req.job_id, aggregated, req.round)
-
-    # Compute metrics (includes α scores and trust registry)
-    metrics_dict = compute_metrics(before_state, aggregated, updates)
-
-    # Clear weight buffer — raw / masked weights never persist after aggregation
-    weight_store.clear(req.job_id, req.round)
-
-    return AggregateResponse(
-        aggregated_weights_b64=serialize_weights(aggregated),
-        metrics=AggregationMetrics(
-            avg_loss=metrics_dict.get("avg_loss"),
-            delta_accuracy=metrics_dict.get("delta_accuracy"),
-            alpha_scores=metrics_dict.get("alpha_scores"),   # NEW
-            trust_scores=metrics_dict.get("trust_scores"),   # NEW
-            mode=metrics_dict.get("mode"),                   # NEW
-        ),
-    )
-
-
-# ── POST /fl/finalize ─────────────────────────────────────────────────────────
-
-@router.post("/finalize", response_model=FinalizeResponse)
-def finalize(req: FinalizeRequest):
-    """Saves global_model.pt to the shared Docker volume."""
-    state_dict = round_controller.get_state_dict(req.job_id)
-    if state_dict is None:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Job {req.job_id} not found or already finalised.",
-        )
-
-    save_path            = os.path.join(MODEL_DIR, req.job_id, "global_model.pt")
-    checksum, size_bytes = save_model_to_disk(state_dict, save_path)
-
-    round_controller.cleanup(req.job_id)
-    weight_store.clear_job(req.job_id)
-
-    return FinalizeResponse(
-        model_path=save_path,
-        checksum=checksum,
-        size_bytes=size_bytes,
-    )
-
-
-# ── GET /fl/status/{job_id} ───────────────────────────────────────────────────
-
-@router.get("/status/{job_id}", response_model=StatusResponse)
-def get_status(job_id: str):
-    """Returns round state and trust scores for a job."""
-    if not round_controller.job_exists(job_id):
-        raise HTTPException(status_code=404, detail=f"Job {job_id} not found.")
-
-    current_round = round_controller.get_round(job_id)
-    submitted     = weight_store.count(job_id, current_round)
-
-    return StatusResponse(
         job_id=job_id,
-        round=current_round,
-        status="active",
-        participants_submitted=submitted,
-        participants_expected=0,
-        aggregation_mode=AGGREGATION_MODE,   # NEW
+        round_number=round_num,
+        company_id=company_id,
+        weights=state_dict,
+        dataset_size=result['dataset_size'],
+        validation_loss=result['metrics']['validation_loss'],
     )
 
-
-# ── GET /fl/trust-scores ──────────────────────────────────────────────────────
-
-@router.get("/trust-scores")
-def trust_scores():
-    """
-    Returns the current trust registry for all companies.
-    Useful for the Node.js admin dashboard to show who has high/low trust.
-    """
-    return {"trust_scores": get_trust_scores(), "mode": AGGREGATION_MODE}
+    return {
+        'trained':      True,
+        'company_id':   company_id,
+        'dataset_size': result['dataset_size'],
+        'metrics':      result['metrics'],
+    }
