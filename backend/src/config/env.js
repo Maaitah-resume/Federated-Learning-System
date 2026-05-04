@@ -2,9 +2,18 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 export const env = {
-  NODE_ENV: process.env.NODE_ENV || 'development',
-  PORT: process.env.PORT || 3000,
-  MONGODB_URI: process.env.MONGODB_URI,
-  JWT_SECRET: process.env.JWT_SECRET || 'fl-system-secret-key-2026',
-  PYTHON_SERVER_URL: process.env.PYTHON_SERVER_URL || 'http://localhost:5000',
+  NODE_ENV:           process.env.NODE_ENV           || 'development',
+  PORT:               process.env.PORT               || 3000,
+  MONGODB_URI:        process.env.MONGODB_URI,
+  JWT_SECRET:         process.env.JWT_SECRET         || 'fl-system-secret-key-2026',
+  PYTHON_SERVER_URL:  process.env.PYTHON_SERVER_URL  || 'http://localhost:5000',
 };
+
+// Federated learning constants
+export const MIN_CLIENTS           = parseInt(process.env.MIN_CLIENTS           || '3',  10);
+export const DEFAULT_ROUNDS        = parseInt(process.env.DEFAULT_ROUNDS        || '10', 10);
+export const ROUND_TIMEOUT_MINUTES = parseInt(process.env.ROUND_TIMEOUT_MINUTES || '5',  10);
+
+// CommonJS interop — backend services use require()
+module.exports = { env, MIN_CLIENTS, DEFAULT_ROUNDS, ROUND_TIMEOUT_MINUTES };
+module.exports.default = env;
