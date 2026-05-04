@@ -9,37 +9,39 @@ interface User {
 }
 
 interface AuthContextType {
-  user:               User | null;
-  login:              (email: string, password: string) => Promise<void>;
-  selectParticipant:  (participantId: string) => void;
-  logout:             () => void;
-  isLoading:          boolean;
-  error:              string | null;
+  user:              User | null;
+  login:             (email: string, password: string) => Promise<void>;
+  selectParticipant: (participantId: string) => void;
+  logout:            () => void;
+  isLoading:         boolean;
+  error:             string | null;
 }
 
 const PARTICIPANT_PROFILES: Record<string, User> = {
-  alpha: {
-    company:   'Participant Alpha',
-    companyId: 'alpha',
-    email:     'alpha@demo.com',
-    token:     'demo-token-alpha',
+  mohammad: {
+    company:   'Mohammad HTU',
+    companyId: 'mohammad',
+    email:     'Mohammad@htu.edu.jo',
+    token:     'demo-token-mohammad',
     role:      'client',
   },
-  beta: {
-    company:   'Participant Beta',
-    companyId: 'beta',
-    email:     'beta@demo.com',
-    token:     'demo-token-beta',
+  amer: {
+    company:   'Amer HTU',
+    companyId: 'amer',
+    email:     'Amer@htu.edu.jo',
+    token:     'demo-token-amer',
     role:      'client',
   },
-  gamma: {
-    company:   'Participant Gamma',
-    companyId: 'gamma',
-    email:     'gamma@demo.com',
-    token:     'demo-token-gamma',
+  ammar: {
+    company:   'Ammar HTU',
+    companyId: 'ammar',
+    email:     'Ammar@htu.edu.jo',
+    token:     'demo-token-ammar',
     role:      'client',
   },
 };
+
+const VALID_PASSWORD = '123';
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
@@ -47,15 +49,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [error, setError] = useState<string | null>(null);
 
   const [user, setUser] = useState<User | null>(() => {
-    const saved = localStorage.getItem('fl_participant');
-    if (saved) {
-      try {
+    try {
+      const saved = localStorage.getItem('fl_participant');
+      if (saved) {
         const id = JSON.parse(saved);
         return PARTICIPANT_PROFILES[id] || null;
-      } catch {
-        return null;
       }
-    }
+    } catch { /* ignore */ }
     return null;
   });
 
@@ -68,18 +68,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  const login = async (email: string, _password: string) => {
+  const login = async (email: string, password: string) => {
     setError(null);
-    // Match by email or by participant ID directly
+
+    // Check password first
+    if (password !== VALID_PASSWORD) {
+      setError('Invalid email or password.');
+      throw new Error('Invalid credentials');
+    }
+
+    // Match by email (case-insensitive) or by companyId
     const id = Object.keys(PARTICIPANT_PROFILES).find(
       (key) =>
-        PARTICIPANT_PROFILES[key].email === email ||
-        key === email
+        PARTICIPANT_PROFILES[key].email.toLowerCase() === email.toLowerCase() ||
+        key.toLowerCase() === email.toLowerCase()
     );
+
     if (id) {
       selectParticipant(id);
     } else {
-      setError('Invalid credentials. Try alpha, beta, or gamma.');
+      setError('Invalid email or password.');
       throw new Error('Invalid credentials');
     }
   };
