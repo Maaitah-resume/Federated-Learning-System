@@ -140,13 +140,12 @@ async function leaveQueue(companyId) {
  * If MIN_CLIENTS are waiting and no job is active, starts a new training job.
  */
 async function checkAndStart() {
-  // In-memory guard — prevents double-start if two joins arrive simultaneously
   if (isStartingJob) return;
-
-  const count = await Participant.countDocuments({
-    status: PARTICIPANT_STATUS.QUEUED,
-    jobId:  null,
-  });
+  const count = await Participant.countDocuments({ ... });
+  if (count < MIN_CLIENTS) return;  // ← waits for 3 (MIN_CLIENTS)
+  // ...
+  await orchestratorService.startJob(participantIds);
+}
 
   if (count < MIN_CLIENTS) return;
 
