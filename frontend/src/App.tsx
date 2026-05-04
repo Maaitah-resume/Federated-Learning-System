@@ -2,6 +2,7 @@ import React from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { SocketProvider } from './context/SocketContext';
+import { QueueProvider } from './context/QueueContext';
 import ParticipantPicker from './components/ParticipantPicker';
 import Sidebar from './components/Sidebar';
 import Dashboard from './pages/Dashboard';
@@ -13,10 +14,12 @@ function AppShell({ children }: { children: React.ReactNode }) {
   const { user, selectParticipant } = useAuth();
   if (!user) return <ParticipantPicker onSelect={selectParticipant} />;
   return (
-    <div className="flex min-h-screen bg-slate-50 font-sans text-slate-900">
-      <Sidebar />
-      <main className="flex-1 p-10 overflow-y-auto">{children}</main>
-    </div>
+    <QueueProvider>
+      <div className="flex min-h-screen bg-slate-50 font-sans text-slate-900">
+        <Sidebar />
+        <main className="flex-1 p-10 overflow-y-auto">{children}</main>
+      </div>
+    </QueueProvider>
   );
 }
 
@@ -24,11 +27,11 @@ function AppRoutes() {
   const { user } = useAuth();
   return (
     <Routes>
-      <Route path="/login"   element={user ? <Navigate to="/" replace /> : <Login />} />
-      <Route path="/"        element={<AppShell><Dashboard /></AppShell>} />
-      <Route path="/queue"   element={<AppShell><Queue /></AppShell>} />
-      <Route path="/models"  element={<AppShell><Models /></AppShell>} />
-      <Route path="*"        element={<Navigate to="/" replace />} />
+      <Route path="/login"  element={user ? <Navigate to="/" replace /> : <Login />} />
+      <Route path="/"       element={<AppShell><Dashboard /></AppShell>} />
+      <Route path="/queue"  element={<AppShell><Queue /></AppShell>} />
+      <Route path="/models" element={<AppShell><Models /></AppShell>} />
+      <Route path="*"       element={<Navigate to="/" replace />} />
     </Routes>
   );
 }
