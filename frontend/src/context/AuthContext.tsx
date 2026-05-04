@@ -9,11 +9,12 @@ interface User {
 }
 
 interface AuthContextType {
-  user:      User | null;
-  selectParticipant: (participantId: string) => void;
-  logout:    () => void;
-  isLoading: boolean;
-  error:     string | null;
+  user:               User | null;
+  login:              (email: string, password: string) => Promise<void>;
+  selectParticipant:  (participantId: string) => void;
+  logout:             () => void;
+  isLoading:          boolean;
+  error:              string | null;
 }
 
 const PARTICIPANT_PROFILES: Record<string, User> = {
@@ -43,12 +44,17 @@ const PARTICIPANT_PROFILES: Record<string, User> = {
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
+  const [error, setError] = useState<string | null>(null);
+
   const [user, setUser] = useState<User | null>(() => {
-    // Restore from localStorage on page refresh
     const saved = localStorage.getItem('fl_participant');
     if (saved) {
-      const id = JSON.parse(saved);
-      return PARTICIPANT_PROFILES[id] || null;
+      try {
+        const id = JSON.parse(saved);
+        return PARTICIPANT_PROFILES[id] || null;
+      } catch {
+        return null;
+      }
     }
     return null;
   });
@@ -57,17 +63,37 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const profile = PARTICIPANT_PROFILES[participantId];
     if (profile) {
       setUser(profile);
+      setError(null);
       localStorage.setItem('fl_participant', JSON.stringify(participantId));
+    }
+  };
+
+  const login = async (email: string, _password: string) => {
+    setError(null);
+    // Match by email or by participant ID directly
+    const id = Object.keys(PARTICIPANT_PROFILES).find(
+      (key) =>
+        PARTICIPANT_PROFILES[key].email === email ||
+        key === email
+    );
+    if (id) {
+      selectParticipant(id);
+    } else {
+      setError('Invalid credentials. Try alpha, beta, or gamma.');
+      throw new Error('Invalid credentials');
     }
   };
 
   const logout = () => {
     setUser(null);
+    setError(null);
     localStorage.removeItem('fl_participant');
   };
 
   return (
-    <AuthContext.Provider value={{ user, selectParticipant, logout, isLoading: false, error: null }}>
+    <AuthContext.Provider
+      value={{ user, login, selectParticipant, logout, isLoading: false, error }}
+    >
       {children}
     </AuthContext.Provider>
   );
