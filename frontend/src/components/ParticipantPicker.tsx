@@ -1,115 +1,194 @@
 import React, { useState } from 'react';
-import { ShieldCheck, ArrowRight } from 'lucide-react';
+import { ShieldCheck, Mail, Lock, Activity } from 'lucide-react';
 import { motion } from 'motion/react';
-
-// The 3 fixed participant IDs for your capstone project
-const PARTICIPANTS = [
-  {
-    id:    'alpha',
-    name:  'Participant Alpha',
-    color: 'border-indigo-500 bg-indigo-50 hover:bg-indigo-100',
-    badge: 'bg-indigo-600',
-    ring:  'ring-indigo-500',
-  },
-  {
-    id:    'beta',
-    name:  'Participant Beta',
-    color: 'border-emerald-500 bg-emerald-50 hover:bg-emerald-100',
-    badge: 'bg-emerald-600',
-    ring:  'ring-emerald-500',
-  },
-  {
-    id:    'gamma',
-    name:  'Participant Gamma',
-    color: 'border-purple-500 bg-purple-50 hover:bg-purple-100',
-    badge: 'bg-purple-600',
-    ring:  'ring-purple-500',
-  },
-];
+import { useAuth } from '../context/AuthContext';
 
 interface Props {
   onSelect: (participantId: string) => void;
 }
 
 export default function ParticipantPicker({ onSelect }: Props) {
-  const [selected, setSelected] = useState<string | null>(null);
+  const [email,    setEmail]    = useState('');
+  const [password, setPassword] = useState('');
+  const [loading,  setLoading]  = useState(false);
+  const [error,    setError]    = useState<string | null>(null);
 
-  const confirm = () => {
-    if (selected) onSelect(selected);
+  const { login } = useAuth();
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    setLoading(true);
+    try {
+      await login(email, password);
+      // AuthContext sets the user — AppShell re-renders automatically
+    } catch {
+      setError('Invalid email or password.');
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-slate-950 p-6 relative overflow-hidden">
-      {/* Background glow */}
-      <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-indigo-600/20 rounded-full blur-[120px] -z-10"></div>
-      <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-emerald-600/20 rounded-full blur-[120px] -z-10"></div>
+
+      {/* Background glows */}
+      <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-indigo-600/20 rounded-full blur-[120px] -z-10" />
+      <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-emerald-600/20 rounded-full blur-[120px] -z-10" />
+      <div className="absolute top-[40%] right-[20%] w-[20%] h-[20%] bg-violet-600/10 rounded-full blur-[80px] -z-10" />
 
       <motion.div
-        initial={{ opacity: 0, scale: 0.95 }}
-        animate={{ opacity: 1, scale: 1 }}
+        initial={{ opacity: 0, y: 20, scale: 0.97 }}
+        animate={{ opacity: 1, y: 0,  scale: 1 }}
+        transition={{ duration: 0.4, ease: 'easeOut' }}
         className="w-full max-w-md"
       >
-        <div className="bg-slate-900 border border-slate-800 p-10 rounded-[2.5rem] shadow-2xl">
+        <div className="bg-slate-900/90 backdrop-blur border border-slate-800 p-10 rounded-[2.5rem] shadow-2xl shadow-black/50">
+
           {/* Header */}
           <div className="flex flex-col items-center mb-10">
-            <div className="w-16 h-16 bg-indigo-600 rounded-2xl flex items-center justify-center shadow-xl shadow-indigo-500/20 mb-6">
-              <ShieldCheck className="text-white" size={32} />
-            </div>
-            <h2 className="text-2xl font-bold text-white tracking-tight text-center">
-              FL-IDS Control Center
-            </h2>
-            <p className="text-slate-400 mt-2 text-center text-sm">
-              Select your participant ID to continue.<br />
-              <span className="text-slate-500 text-xs">This is saved on your device — you only pick once.</span>
-            </p>
+            <motion.div
+              initial={{ scale: 0.8, opacity: 0 }}
+              animate={{ scale: 1,   opacity: 1 }}
+              transition={{ delay: 0.1, duration: 0.4, type: 'spring' }}
+              className="relative mb-6"
+            >
+              <div className="w-20 h-20 bg-gradient-to-br from-indigo-500 to-indigo-700 rounded-[1.5rem] flex items-center justify-center shadow-2xl shadow-indigo-500/30">
+                <ShieldCheck className="text-white" size={36} />
+              </div>
+              <div className="absolute -bottom-1 -right-1 w-6 h-6 bg-emerald-500 rounded-full flex items-center justify-center shadow-lg">
+                <Activity size={12} className="text-white" />
+              </div>
+            </motion.div>
+
+            <motion.h2
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.2 }}
+              className="text-3xl font-bold text-white tracking-tight text-center"
+            >
+              FL-IDS System
+            </motion.h2>
+            <motion.p
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.25 }}
+              className="text-slate-400 mt-2 text-center text-sm leading-relaxed"
+            >
+              Federated Learning — Intrusion Detection System<br />
+              <span className="text-slate-500 text-xs">HTU Research Project</span>
+            </motion.p>
           </div>
 
-          {/* Participant cards */}
-          <div className="space-y-3 mb-8">
-            {PARTICIPANTS.map((p) => (
-              <button
-                key={p.id}
-                onClick={() => setSelected(p.id)}
-                className={`
-                  w-full p-5 rounded-2xl border-2 transition-all text-left flex items-center gap-4
-                  ${selected === p.id
-                    ? `${p.color} ${p.ring} ring-2`
-                    : 'border-slate-700 bg-slate-800/50 hover:bg-slate-800'}
-                `}
-              >
-                <div className={`w-10 h-10 ${p.badge} rounded-xl flex items-center justify-center text-white font-bold text-lg`}>
-                  {p.id[0].toUpperCase()}
-                </div>
-                <div>
-                  <p className={`font-bold ${selected === p.id ? 'text-slate-900' : 'text-white'}`}>
-                    {p.name}
-                  </p>
-                  <p className={`text-xs ${selected === p.id ? 'text-slate-600' : 'text-slate-500'}`}>
-                    ID: {p.id}
-                  </p>
-                </div>
-                {selected === p.id && (
-                  <div className="ml-auto w-5 h-5 rounded-full bg-white border-2 border-indigo-500 flex items-center justify-center">
-                    <div className="w-2.5 h-2.5 rounded-full bg-indigo-600"></div>
-                  </div>
-                )}
-              </button>
-            ))}
-          </div>
+          {/* Error */}
+          {error && (
+            <motion.div
+              initial={{ opacity: 0, y: -8 }}
+              animate={{ opacity: 1,  y: 0 }}
+              className="mb-5 p-3 bg-red-500/10 border border-red-500/20 rounded-2xl text-red-400 text-sm text-center"
+            >
+              {error}
+            </motion.div>
+          )}
 
-          {/* Confirm button */}
-          <button
-            onClick={confirm}
-            disabled={!selected}
-            className="w-full bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-700 disabled:cursor-not-allowed text-white py-4 rounded-2xl font-bold text-lg transition-all flex items-center justify-center gap-2 group"
+          {/* Form */}
+          <motion.form
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1,  y: 0 }}
+            transition={{ delay: 0.3 }}
+            onSubmit={handleSubmit}
+            className="space-y-4"
           >
-            Enter as {selected ? PARTICIPANTS.find(p => p.id === selected)?.name : '...'}
-            <ArrowRight size={20} className="group-hover:translate-x-1 transition-transform" />
-          </button>
+            {/* Email */}
+            <div className="space-y-2">
+              <label className="text-xs font-bold text-slate-500 uppercase tracking-widest ml-1">
+                University Email
+              </label>
+              <div className="relative group">
+                <Mail
+                  className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-500 group-focus-within:text-indigo-400 transition-colors"
+                  size={18}
+                />
+                <input
+                  type="email"
+                  placeholder="your@htu.edu.jo"
+                  className="w-full pl-12 pr-4 py-3.5 bg-slate-800/60 border border-slate-700 rounded-2xl text-white placeholder:text-slate-600 focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all outline-none text-sm"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  disabled={loading}
+                  autoComplete="email"
+                  required
+                />
+              </div>
+            </div>
 
-          <p className="mt-4 text-center text-xs text-slate-600">
-            Your ID is stored locally. Clear browser data to reset.
-          </p>
+            {/* Password */}
+            <div className="space-y-2">
+              <label className="text-xs font-bold text-slate-500 uppercase tracking-widest ml-1">
+                Password
+              </label>
+              <div className="relative group">
+                <Lock
+                  className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-500 group-focus-within:text-indigo-400 transition-colors"
+                  size={18}
+                />
+                <input
+                  type="password"
+                  placeholder="••••••••"
+                  className="w-full pl-12 pr-4 py-3.5 bg-slate-800/60 border border-slate-700 rounded-2xl text-white placeholder:text-slate-600 focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all outline-none text-sm"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  disabled={loading}
+                  autoComplete="current-password"
+                  required
+                />
+              </div>
+            </div>
+
+            {/* Submit */}
+            <motion.button
+              type="submit"
+              disabled={loading || !email || !password}
+              whileTap={{ scale: 0.98 }}
+              className="w-full bg-gradient-to-r from-indigo-600 to-indigo-500 hover:from-indigo-500 hover:to-indigo-400 disabled:from-slate-700 disabled:to-slate-700 disabled:cursor-not-allowed text-white py-4 rounded-2xl font-bold text-base transition-all mt-2 shadow-xl shadow-indigo-500/20 flex items-center justify-center gap-2"
+            >
+              {loading ? (
+                <>
+                  <svg className="animate-spin h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" />
+                  </svg>
+                  Signing in...
+                </>
+              ) : (
+                'Sign In to FL System'
+              )}
+            </motion.button>
+          </motion.form>
+
+          {/* Footer */}
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ delay: 0.5 }}
+            className="mt-8 pt-6 border-t border-slate-800"
+          >
+            <div className="flex items-center justify-center gap-6 text-xs text-slate-600">
+              <div className="flex items-center gap-1.5">
+                <div className="w-1.5 h-1.5 rounded-full bg-emerald-500"></div>
+                Federated Privacy
+              </div>
+              <div className="flex items-center gap-1.5">
+                <div className="w-1.5 h-1.5 rounded-full bg-indigo-500"></div>
+                Secure Aggregation
+              </div>
+              <div className="flex items-center gap-1.5">
+                <div className="w-1.5 h-1.5 rounded-full bg-violet-500"></div>
+                IDS Detection
+              </div>
+            </div>
+          </motion.div>
+
         </div>
       </motion.div>
     </div>
