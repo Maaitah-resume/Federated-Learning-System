@@ -14,6 +14,19 @@ let isStartingJob = false;
 /**
  * Returns the current queue state — list of waiting companies + metadata.
  */
+async function joinQueue(companyId) {
+  // NEW: Require uploaded data before joining
+  const UserData = require('../models/UserData');
+  const userData = await UserData.findOne({ companyId });
+  if (!userData) {
+    throw Object.assign(new Error('Please upload your data before joining the queue'), {
+      status: 400,
+      code:   'NO_DATA_UPLOADED',
+    });
+  }
+
+  // ... existing code below stays the same
+
 async function getQueueState() {
   const queued = await Participant.find({
     status: PARTICIPANT_STATUS.QUEUED,
