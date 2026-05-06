@@ -2,10 +2,10 @@ import React, { createContext, useContext, useEffect, useState, ReactNode, useCa
 import { apiClient } from '../config/api';
 
 interface QueueNode {
-  companyId:   string;
+  companyId:    string;
   companyName?: string;
-  joinedAt:    string;
-  status:      string;
+  joinedAt:     string;
+  status:       string;
 }
 
 interface ActiveJob {
@@ -16,9 +16,10 @@ interface ActiveJob {
 }
 
 interface QueueState {
-  count:     number;
-  companies: QueueNode[];
-  activeJob: ActiveJob | null;
+  count:       number;
+  minRequired: number;   // ← dynamic from backend (set by admin)
+  companies:   QueueNode[];
+  activeJob:   ActiveJob | null;
 }
 
 interface QueueContextType {
@@ -31,7 +32,7 @@ interface QueueContextType {
 const QueueContext = createContext<QueueContextType | undefined>(undefined);
 
 export function QueueProvider({ children }: { children: ReactNode }) {
-  const [queue,   setQueue]   = useState<QueueState>({ count: 0, companies: [], activeJob: null });
+  const [queue,   setQueue]   = useState<QueueState>({ count: 0, minRequired: 3, companies: [], activeJob: null });
   const [inQueue, setInQueue] = useState(false);
   const [loading, setLoading] = useState(true);
 
@@ -45,13 +46,15 @@ export function QueueProvider({ children }: { children: ReactNode }) {
     try {
       const res   = await apiClient.get('/api/queue');
       const nodes = res.data.participants || res.data.companies || [];
-      setQueue({ ...res.data, companies: nodes });
 
-      // User is "in" if they appear in the node list (QUEUED or TRAINING)
+      setQueue({
+        ...res.data,
+        companies:   nodes,
+        minRequired: res.data.minRequired || 3,  // ← use backend value
+      });
+
       const found = nodes.some((c: QueueNode) => c.companyId === currentId);
-      // Also mark as inQueue if active job contains them (even if DB not updated yet)
-      const inJob = res.data.activeJob?.jobId && nodes.length > 0;
-      setInQueue(found || (!!inJob && nodes.some((c: QueueNode) => c.companyId === currentId)));
+      setInQueue(found);
     } catch (err) {
       console.error('Queue fetch error:', err);
     } finally {
@@ -61,7 +64,7 @@ export function QueueProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     refresh();
-    const interval = setInterval(refresh, 3000); // poll every 3s for smoother round updates
+    const interval = setInterval(refresh, 3000);
     return () => clearInterval(interval);
   }, [refresh]);
 
