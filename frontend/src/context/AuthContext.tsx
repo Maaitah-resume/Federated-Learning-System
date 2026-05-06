@@ -5,7 +5,7 @@ interface User {
   companyId: string;
   email:     string;
   token:     string;
-  role?:     string;
+  role:      string;
 }
 
 interface AuthContextType {
@@ -39,6 +39,14 @@ const PARTICIPANT_PROFILES: Record<string, User> = {
     token:     'demo-token-ammar',
     role:      'client',
   },
+  // ── Admin account ──────────────────────────────────────────────────────────
+  admin: {
+    company:   'FL Administrator',
+    companyId: 'admin',
+    email:     'admin@htu.edu.jo',
+    token:     'demo-token-admin',
+    role:      'admin',
+  },
 };
 
 const VALID_PASSWORD = '123';
@@ -71,13 +79,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const login = async (email: string, password: string) => {
     setError(null);
 
-    // Check password first
     if (password !== VALID_PASSWORD) {
       setError('Invalid email or password.');
       throw new Error('Invalid credentials');
     }
 
-    // Match by email (case-insensitive) or by companyId
     const id = Object.keys(PARTICIPANT_PROFILES).find(
       (key) =>
         PARTICIPANT_PROFILES[key].email.toLowerCase() === email.toLowerCase() ||
