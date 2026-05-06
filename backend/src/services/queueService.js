@@ -4,14 +4,24 @@ const UserData           = require('../models/UserData');
 const simulatedOrch      = require('./simulatedOrchestrator');
 const emitter            = require('../websocket/eventEmitter');
 const { PARTICIPANT_STATUS, WS_EVENTS } = require('../config/constants');
-const { MIN_CLIENTS }    = require('../config/env');
+const { getConfig }      = require('../models/SystemConfig');  // ← reads from DB
 
 let isStartingJob = false;
 
-async function getQueueState() {
-  const activeJob = simulatedOrch.getActiveJob();
+// Helper: get MIN_CLIENTS from DB, fallback to env var, fallback to 3
+async function getMinClients() {
+  try {
+    const val = await getConfig('MIN_CLIENTS');
+    return val || parseInt(process.env.MIN_CLIENTS || '3', 10);
+  } catch {
+    return parseInt(process.env.MIN_CLIENTS || '3', 10);
+  }
+}
 
-  // Show QUEUED participants when idle, TRAINING participants when job is running
+async function getQueueState() {
+  const activeJob  = simulatedOrch.getActiveJob();
+  const minClients = await getMinClients();
+
   const statusFilter = activeJob
     ? { status: PARTICIPANT_STATUS.TRAINING, jobId: activeJob.jobId }
     : { status: PARTICIPANT_STATUS.QUEUED, jobId: null };
@@ -30,8 +40,8 @@ async function getQueueState() {
       status:      p.status,
     })),
     count:        participants.length,
-    minRequired:  MIN_CLIENTS || 3,
-    readyToStart: participants.length >= (MIN_CLIENTS || 3),
+    minRequired:  minClients,
+    readyToStart: participants.length >= minClients,
     activeJob: activeJob ? {
       jobId:        activeJob.jobId,
       status:       activeJob.status,
@@ -42,7 +52,6 @@ async function getQueueState() {
 }
 
 async function joinQueue(companyId) {
-  // Require uploaded data
   const userData = await UserData.findOne({ companyId });
   if (!userData) {
     const err = new Error('Please upload your data before joining the queue');
@@ -50,7 +59,6 @@ async function joinQueue(companyId) {
     throw err;
   }
 
-  // Already queued?
   const existing = await Participant.findOne({ companyId, status: PARTICIPANT_STATUS.QUEUED, jobId: null });
   if (existing) {
     const err = new Error('Already in queue');
@@ -58,7 +66,6 @@ async function joinQueue(companyId) {
     throw err;
   }
 
-  // Already in active job?
   const activeJob = simulatedOrch.getActiveJob();
   if (activeJob && activeJob.participantIds.includes(companyId)) {
     const err = new Error('Training already in progress for your company');
@@ -100,8 +107,8 @@ async function leaveQueue(companyId) {
 async function checkAndStart() {
   if (isStartingJob) return;
 
-  const minClients = MIN_CLIENTS || 3;
-  const count = await Participant.countDocuments({ status: PARTICIPANT_STATUS.QUEUED, jobId: null });
+  const minClients = await getMinClients();
+  const count      = await Participant.countDocuments({ status: PARTICIPANT_STATUS.QUEUED, jobId: null });
 
   if (count < minClients) {
     console.log(`[Queue] ${count}/${minClients} — not enough to start`);
