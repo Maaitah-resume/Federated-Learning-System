@@ -16,7 +16,7 @@ const metricsRoutes  = require('./routes/metrics.routes');
 const trainingRoutes = require('./routes/training.routes');
 const modelRoutes    = require('./routes/model.routes');
 const healthRoutes   = require('./routes/health.routes');
-const adminRoutes    = require('./routes/admin.routes');   // ← NEW
+const adminRoutes    = require('./routes/admin.routes');
 
 const app = express();
 
@@ -41,9 +41,9 @@ app.use('/api/data',     apiLimiter,   dataRoutes);
 app.use('/api/metrics',  apiLimiter,   metricsRoutes);
 app.use('/api/training', apiLimiter,   trainingRoutes);
 app.use('/api/models',   apiLimiter,   modelRoutes);
-app.use('/api/admin',    apiLimiter,   adminRoutes);       // ← NEW
+app.use('/api/admin',    apiLimiter,   adminRoutes);
 
-// ── Demo seed data ─────────────────────────────────────────────────────────────
+// ── Demo seed data — uses upsert to always update roles ────────────────────────
 const Company = require('./models/Company');
 
 app.post('/api/demo/seed', async (req, res) => {
@@ -52,19 +52,34 @@ app.post('/api/demo/seed', async (req, res) => {
       { companyId: 'mohammad', companyName: 'Mohammad HTU', email: 'Mohammad@htu.edu.jo', passwordHash: '123', role: 'client' },
       { companyId: 'amer',     companyName: 'Amer HTU',     email: 'Amer@htu.edu.jo',     passwordHash: '123', role: 'client' },
       { companyId: 'ammar',    companyName: 'Ammar HTU',    email: 'Ammar@htu.edu.jo',    passwordHash: '123', role: 'client' },
-      { companyId: 'admin',    companyName: 'FL Administrator', email: 'admin@htu.edu.jo', passwordHash: '123', role: 'admin'  },
+      { companyId: 'admin',    companyName: 'FL Administrator', email: 'admin@htu.edu.jo', passwordHash: '123', role: 'admin' },
     ];
     const results = [];
     for (const c of demoCompanies) {
-      const existing = await Company.findOne({ companyId: c.companyId });
-      if (!existing) {
-        await Company.create(c);
-        results.push(`created: ${c.companyId}`);
-      } else {
-        results.push(`exists:  ${c.companyId}`);
-      }
+      // Use upsert so roles are always updated even if user already exists
+      await Company.findOneAndUpdate(
+        { companyId: c.companyId },
+        { $set: c },
+        { upsert: true, new: true }
+      );
+      results.push(`upserted: ${c.companyId} (role: ${c.role})`);
     }
     return res.status(200).json({ seeded: results });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Fix admin role if it was created with role: 'client' ──────────────────────
+app.post('/api/debug/fix-admin', async (req, res) => {
+  try {
+    const result = await Company.findOneAndUpdate(
+      { companyId: 'admin' },
+      { $set: { role: 'admin', isActive: true } },
+      { new: true }
+    );
+    if (!result) return res.status(404).json({ error: 'Admin user not found. Run /api/demo/seed first.' });
+    return res.json({ fixed: true, companyId: result.companyId, role: result.role });
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }
