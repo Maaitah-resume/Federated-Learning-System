@@ -13,7 +13,13 @@ import Models from './pages/Models';
 // ── Shell for regular clients ─────────────────────────────────────────────────
 function AppShell({ children }: { children: React.ReactNode }) {
   const { user, selectParticipant } = useAuth();
+
+  // Not logged in → show login
   if (!user) return <ParticipantPicker onSelect={selectParticipant} />;
+
+  // Admin accidentally hit a client route → send to admin dashboard
+  if (user.role === 'admin') return <Navigate to="/admin" replace />;
+
   return (
     <QueueProvider>
       <div className="flex min-h-screen bg-slate-50 font-sans text-slate-900">
@@ -27,23 +33,27 @@ function AppShell({ children }: { children: React.ReactNode }) {
 // ── Shell for admin ───────────────────────────────────────────────────────────
 function AdminShell({ children }: { children: React.ReactNode }) {
   const { user, logout } = useAuth();
-  if (!user) return <Navigate to="/" replace />;
+
+  if (!user) return <ParticipantPicker onSelect={() => {}} />;
+  if (user.role !== 'admin') return <Navigate to="/" replace />;
+
   return (
     <div className="min-h-screen bg-slate-50 font-sans text-slate-900">
-      {/* Minimal top bar for admin */}
-      <div className="bg-slate-900 text-white px-8 py-4 flex items-center justify-between sticky top-0 z-50">
+      <div className="bg-slate-900 text-white px-8 py-4 flex items-center justify-between sticky top-0 z-50 shadow-lg">
         <div className="flex items-center gap-3">
-          <div className="w-8 h-8 bg-violet-600 rounded-lg flex items-center justify-center text-xs font-black">A</div>
+          <div className="w-9 h-9 bg-violet-600 rounded-xl flex items-center justify-center text-sm font-black shadow-lg shadow-violet-500/20">
+            A
+          </div>
           <div>
-            <p className="font-bold text-sm leading-tight">FL Admin</p>
-            <p className="text-[10px] text-slate-400">Control Panel</p>
+            <p className="font-bold text-sm leading-tight">FL Admin Panel</p>
+            <p className="text-[10px] text-slate-400 uppercase tracking-widest">Control Center</p>
           </div>
         </div>
         <div className="flex items-center gap-4">
-          <span className="text-xs text-slate-400">{user.email}</span>
+          <span className="text-xs text-slate-400 hidden sm:block">{user.email}</span>
           <button
             onClick={logout}
-            className="text-xs bg-slate-700 hover:bg-slate-600 px-4 py-2 rounded-lg font-medium transition-colors"
+            className="text-xs bg-slate-700 hover:bg-red-600 px-4 py-2 rounded-xl font-medium transition-colors"
           >
             Logout
           </button>
@@ -54,28 +64,22 @@ function AdminShell({ children }: { children: React.ReactNode }) {
   );
 }
 
-// ── Route guard ───────────────────────────────────────────────────────────────
+// ── Routes ────────────────────────────────────────────────────────────────────
 function AppRoutes() {
   const { user } = useAuth();
   const isAdmin  = user?.role === 'admin';
 
   return (
     <Routes>
-      {/* Admin gets their own dashboard */}
-      <Route path="/admin" element={
-        user
-          ? isAdmin
-            ? <AdminShell><AdminDashboard /></AdminShell>
-            : <Navigate to="/" replace />
-          : <Navigate to="/" replace />
-      } />
+      {/* Admin dashboard */}
+      <Route path="/admin"  element={<AdminShell><AdminDashboard /></AdminShell>} />
 
-      {/* Regular client routes */}
+      {/* Client routes — admin gets bounced to /admin inside AppShell */}
       <Route path="/"       element={<AppShell><Dashboard /></AppShell>} />
       <Route path="/queue"  element={<AppShell><Queue /></AppShell>} />
       <Route path="/models" element={<AppShell><Models /></AppShell>} />
 
-      {/* Catch-all: admin → /admin, client → / */}
+      {/* Catch-all */}
       <Route path="*" element={<Navigate to={isAdmin ? '/admin' : '/'} replace />} />
     </Routes>
   );
