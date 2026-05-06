@@ -16,6 +16,7 @@ const metricsRoutes  = require('./routes/metrics.routes');
 const trainingRoutes = require('./routes/training.routes');
 const modelRoutes    = require('./routes/model.routes');
 const healthRoutes   = require('./routes/health.routes');
+const adminRoutes    = require('./routes/admin.routes');   // ← NEW
 
 const app = express();
 
@@ -40,6 +41,7 @@ app.use('/api/data',     apiLimiter,   dataRoutes);
 app.use('/api/metrics',  apiLimiter,   metricsRoutes);
 app.use('/api/training', apiLimiter,   trainingRoutes);
 app.use('/api/models',   apiLimiter,   modelRoutes);
+app.use('/api/admin',    apiLimiter,   adminRoutes);       // ← NEW
 
 // ── Demo seed data ─────────────────────────────────────────────────────────────
 const Company = require('./models/Company');
@@ -50,6 +52,7 @@ app.post('/api/demo/seed', async (req, res) => {
       { companyId: 'mohammad', companyName: 'Mohammad HTU', email: 'Mohammad@htu.edu.jo', passwordHash: '123', role: 'client' },
       { companyId: 'amer',     companyName: 'Amer HTU',     email: 'Amer@htu.edu.jo',     passwordHash: '123', role: 'client' },
       { companyId: 'ammar',    companyName: 'Ammar HTU',    email: 'Ammar@htu.edu.jo',    passwordHash: '123', role: 'client' },
+      { companyId: 'admin',    companyName: 'FL Administrator', email: 'admin@htu.edu.jo', passwordHash: '123', role: 'admin'  },
     ];
     const results = [];
     for (const c of demoCompanies) {
@@ -74,13 +77,10 @@ app.post('/api/debug/fix-models', async (req, res) => {
     const TrainingMetric = require('./models/TrainingMetric');
     const models         = await Model.find({});
     const results        = [];
-
     for (const model of models) {
       const companyIds = await TrainingMetric.find({
-        jobId: model.jobId,
-        type:  'local',
+        jobId: model.jobId, type: 'local',
       }).distinct('companyId');
-
       if (companyIds.length > 0) {
         await Model.updateOne(
           { _id: model._id },
@@ -88,10 +88,9 @@ app.post('/api/debug/fix-models', async (req, res) => {
         );
         results.push(`fixed: ${model.modelId} → [${companyIds.join(', ')}]`);
       } else {
-        results.push(`skipped: ${model.modelId} (no metrics found)`);
+        results.push(`skipped: ${model.modelId}`);
       }
     }
-
     return res.json({ done: true, total: models.length, results });
   } catch (err) {
     return res.status(500).json({ error: err.message });
