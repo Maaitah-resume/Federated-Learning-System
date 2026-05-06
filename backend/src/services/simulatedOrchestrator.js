@@ -3,6 +3,7 @@ const TrainingMetric    = require('../models/TrainingMetric');
 const Participant       = require('../models/Participant');
 const Model             = require('../models/Models');
 const emitter           = require('../websocket/eventEmitter');
+const pythonBridge      = require('./pythonBridge');
 const { PARTICIPANT_STATUS, WS_EVENTS } = require('../config/constants');
 const { DEFAULT_ROUNDS } = require('../config/env');
 
@@ -36,7 +37,6 @@ async function startJob(participantIds) {
 
   activeJob = { jobId, status: 'INITIALIZING', participantIds, totalRounds, currentRound: 0, startedAt: new Date() };
 
-  // Move participants to TRAINING
   for (const companyId of participantIds) {
     await Participant.findOneAndUpdate(
       { companyId, status: PARTICIPANT_STATUS.QUEUED },
@@ -48,7 +48,6 @@ async function startJob(participantIds) {
     jobId, totalRounds, participants: participantIds, startTime: activeJob.startedAt,
   });
 
-  // Run rounds async — don't block the HTTP response
   runRounds(jobId, participantIds, totalRounds).catch((err) => {
     console.error(`[SimOrchestrator] Job ${jobId} crashed:`, err.message);
     activeJob = null;
@@ -60,6 +59,19 @@ async function startJob(participantIds) {
 async function runRounds(jobId, participantIds, totalRounds) {
   const ROUND_DURATION_MS = 4000;
 
+  // Step 1: Get real model weights from Python FL server
+  let weightsB64 = null;
+  let modelParams = 0;
+  try {
+    const initResult = await pythonBridge.initialize(jobId, 'IDSNet_v2');
+    weightsB64   = initResult.weights_b64;
+    modelParams  = initResult.num_params || 0;
+    console.log(`[SimOrchestrator] FL server initialized — ${modelParams} params`);
+  } catch (err) {
+    console.warn(`[SimOrchestrator] FL server unreachable, using simulated weights: ${err.message}`);
+    weightsB64 = null;
+  }
+
   for (let round = 1; round <= totalRounds; round++) {
     activeJob.currentRound = round;
     activeJob.status = 'TRAINING';
@@ -67,7 +79,6 @@ async function runRounds(jobId, participantIds, totalRounds) {
     emitter.emit(WS_EVENTS.ROUND_STARTED, { jobId, round, totalRounds });
     console.log(`[SimOrchestrator] ${jobId} — Round ${round}/${totalRounds}`);
 
-    // Save local metrics for each participant
     for (const companyId of participantIds) {
       const jitter = (Math.random() - 0.5) * 0.06;
       const m = metricsForRound(round, totalRounds, jitter);
@@ -84,10 +95,8 @@ async function runRounds(jobId, participantIds, totalRounds) {
       });
     }
 
-    // Wait for simulated training
     await new Promise((r) => setTimeout(r, ROUND_DURATION_MS));
 
-    // Aggregate (FedAvg simulation)
     activeJob.status = 'AGGREGATING';
     const locals = await TrainingMetric.find({ jobId, round, type: 'local' });
     const avg    = (key) => locals.reduce((s, x) => s + (x[key] || 0), 0) / locals.length;
@@ -104,10 +113,25 @@ async function runRounds(jobId, participantIds, totalRounds) {
     console.log(`[SimOrchestrator] ${jobId} — Round ${round} aggregated`);
   }
 
-  // Get final metrics
   const finalGlobal = await TrainingMetric.findOne({ jobId, type: 'global' }).sort({ round: -1 });
 
-  // Save model — participants field is critical for per-user access
+  // Step 2: Try to get final weights from FL server (aggregate round)
+  try {
+    const aggResult = await pythonBridge.aggregate(jobId, totalRounds);
+    if (aggResult?.aggregated_weights_b64) {
+      weightsB64 = aggResult.aggregated_weights_b64;
+      console.log(`[SimOrchestrator] Got aggregated weights from FL server`);
+    }
+  } catch (err) {
+    console.warn(`[SimOrchestrator] Could not get aggregated weights: ${err.message}`);
+  }
+
+  // Compute actual size of weights
+  const weightsBytes = weightsB64
+    ? Math.round(Buffer.byteLength(weightsB64, 'base64'))
+    : 1024 * 1024 * 4;
+
+  // Step 3: Save model with real weights
   try {
     await Model.create({
       modelId:      `model-${jobId}`,
@@ -115,8 +139,9 @@ async function runRounds(jobId, participantIds, totalRounds) {
       version:      '1.0.0',
       status:       'AVAILABLE',
       architecture: 'IDSNet_v2',
-      participants: participantIds,          // ← who can access this model
-      sizeBytes:    1024 * 1024 * 4,         // simulated 4MB
+      participants: participantIds,
+      weightsB64:   weightsB64,        // real .pt weights from FL server
+      sizeBytes:    weightsBytes,
       artifactPath: `/models/${jobId}/global_model.pt`,
       trainingMetrics: {
         finalAccuracy:     finalGlobal?.accuracy || 0,
@@ -125,12 +150,11 @@ async function runRounds(jobId, participantIds, totalRounds) {
         totalParticipants: participantIds.length,
       },
     });
-    console.log(`[SimOrchestrator] Model saved for job ${jobId} — participants: [${participantIds.join(', ')}]`);
+    console.log(`[SimOrchestrator] Model saved — ${(weightsBytes / 1024).toFixed(1)} KB — participants: [${participantIds.join(', ')}]`);
   } catch (err) {
     console.error('[SimOrchestrator] Model save error:', err.message);
   }
 
-  // Reset participants to DONE
   await Participant.updateMany(
     { jobId },
     { $set: { status: 'DONE', jobId: null } }
