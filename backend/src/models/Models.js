@@ -9,7 +9,10 @@ const modelSchema = new mongoose.Schema({
   artifactPath: { type: String },
   checksum:     { type: String },
   sizeBytes:    { type: Number, default: 0 },
-  participants: [{ type: String }], // companyIds who trained this model
+  participants: [{ type: String }],
+
+  // Actual model weights stored as base64 — served as .pt on download
+  weightsB64:   { type: String },
 
   trainingMetrics: {
     finalAccuracy:     { type: Number },
