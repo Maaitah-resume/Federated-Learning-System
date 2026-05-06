@@ -17,96 +17,87 @@ interface AuthContextType {
   error:             string | null;
 }
 
-const PARTICIPANT_PROFILES: Record<string, User> = {
-  mohammad: {
-    company:   'Mohammad HTU',
-    companyId: 'mohammad',
-    email:     'Mohammad@htu.edu.jo',
-    token:     'demo-token-mohammad',
-    role:      'client',
-  },
-  amer: {
-    company:   'Amer HTU',
-    companyId: 'amer',
-    email:     'Amer@htu.edu.jo',
-    token:     'demo-token-amer',
-    role:      'client',
-  },
-  ammar: {
-    company:   'Ammar HTU',
-    companyId: 'ammar',
-    email:     'Ammar@htu.edu.jo',
-    token:     'demo-token-ammar',
-    role:      'client',
-  },
-  // ── Admin account ──────────────────────────────────────────────────────────
-  admin: {
-    company:   'FL Administrator',
-    companyId: 'admin',
-    email:     'admin@htu.edu.jo',
-    token:     'demo-token-admin',
-    role:      'admin',
-  },
-};
-
-const VALID_PASSWORD = '123';
+const API_BASE =
+  (import.meta as any).env?.VITE_API_URL ||
+  'https://earnest-heart-production.up.railway.app';
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [error, setError] = useState<string | null>(null);
+  const [error,     setError]     = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
 
   const [user, setUser] = useState<User | null>(() => {
     try {
-      const saved = localStorage.getItem('fl_participant');
-      if (saved) {
-        const id = JSON.parse(saved);
-        return PARTICIPANT_PROFILES[id] || null;
-      }
+      const saved = localStorage.getItem('fl_user_session');
+      if (saved) return JSON.parse(saved);
     } catch { /* ignore */ }
     return null;
   });
 
-  const selectParticipant = (participantId: string) => {
-    const profile = PARTICIPANT_PROFILES[participantId];
-    if (profile) {
-      setUser(profile);
-      setError(null);
-      localStorage.setItem('fl_participant', JSON.stringify(participantId));
+  /**
+   * Login via backend API — works for ANY user in the database.
+   * No hardcoded user list needed.
+   */
+  const login = async (email: string, password: string) => {
+    setError(null);
+    setIsLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/auth/login`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ email, password }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        const msg = data?.error?.message || 'Invalid email or password.';
+        setError(msg);
+        throw new Error(msg);
+      }
+
+      const { token, company } = data;
+
+      const userObj: User = {
+        company:   company.companyName,
+        companyId: company.companyId,
+        email:     company.email,
+        token,
+        role:      company.role,
+      };
+
+      setUser(userObj);
+      // Save participant ID for api.ts interceptor
+      localStorage.setItem('fl_participant',    JSON.stringify(company.companyId));
+      // Save full session for page reloads
+      localStorage.setItem('fl_user_session',   JSON.stringify(userObj));
+    } catch (err: any) {
+      if (!error) setError(err.message || 'Login failed');
+      throw err;
+    } finally {
+      setIsLoading(false);
     }
   };
 
-  const login = async (email: string, password: string) => {
-    setError(null);
-
-    if (password !== VALID_PASSWORD) {
-      setError('Invalid email or password.');
-      throw new Error('Invalid credentials');
-    }
-
-    const id = Object.keys(PARTICIPANT_PROFILES).find(
-      (key) =>
-        PARTICIPANT_PROFILES[key].email.toLowerCase() === email.toLowerCase() ||
-        key.toLowerCase() === email.toLowerCase()
-    );
-
-    if (id) {
-      selectParticipant(id);
-    } else {
-      setError('Invalid email or password.');
-      throw new Error('Invalid credentials');
-    }
+  /**
+   * selectParticipant kept for ParticipantPicker compatibility
+   * (now unused but harmless to keep)
+   */
+  const selectParticipant = (participantId: string) => {
+    console.warn('selectParticipant is deprecated — use login() instead');
   };
 
   const logout = () => {
     setUser(null);
     setError(null);
     localStorage.removeItem('fl_participant');
+    localStorage.removeItem('fl_user_session');
   };
 
   return (
     <AuthContext.Provider
-      value={{ user, login, selectParticipant, logout, isLoading: false, error }}
+      value={{ user, login, selectParticipant, logout, isLoading, error }}
     >
       {children}
     </AuthContext.Provider>
