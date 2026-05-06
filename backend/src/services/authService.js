@@ -1,67 +1,39 @@
 const Company = require('../models/Company');
 
-// Fixed list of allowed demo users - no auto-create
-const DEMO_USERS = [
-  {
-    companyId:    'alpha',
-    companyName:  'Alpha Corporation',
-    email:        'alpha@demo.com',
-    passwordHash: 'demo123',
-    role:         'client',
-    isActive:     true,
-  },
-  {
-    companyId:    'beta',
-    companyName:  'Beta Industries',
-    email:        'beta@demo.com',
-    passwordHash: 'demo123',
-    role:         'client',
-    isActive:     true,
-  },
-  {
-    companyId:    'gamma',
-    companyName:  'Gamma Systems',
-    email:        'gamma@demo.com',
-    passwordHash: 'demo123',
-    role:         'client',
-    isActive:     true,
-  },
-];
-
-// Seed demo users on first load (idempotent - safe to run many times)
-async function ensureDemoUsers() {
-  for (const userData of DEMO_USERS) {
-    const existing = await Company.findOne({ companyId: userData.companyId });
-    if (!existing) {
-      try {
-        await Company.create(userData);
-        console.log(`✅ Seeded demo user: ${userData.companyId}`);
-      } catch (err) {
-        // Ignore duplicate key errors from concurrent seed attempts
-        if (err.code !== 11000) console.error(`Seed error for ${userData.companyId}:`, err.message);
-      }
-    }
-  }
-}
-
+/**
+ * Login using email or companyId + password.
+ * Looks up user from MongoDB — works for ANY user added via admin panel.
+ */
 async function login(email, password) {
-  // Make sure demo users exist on every login attempt
-  await ensureDemoUsers();
+  if (!email || !password) {
+    const err = new Error('Email and password are required');
+    err.statusCode = 400;
+    throw err;
+  }
 
-  // Find by email or companyId (so 'alpha' or 'alpha@demo.com' both work)
+  // Find by email (case-insensitive) or companyId
   const company = await Company.findOne({
-    $or: [{ email: email.toLowerCase() }, { companyId: email.toLowerCase() }],
+    $or: [
+      { email: email.toLowerCase().trim() },
+      { companyId: email.toLowerCase().trim() },
+    ],
   });
 
   if (!company) {
-    const err = new Error('Invalid credentials. Try: alpha, beta, or gamma');
+    const err = new Error('Invalid email or password.');
     err.statusCode = 401;
     throw err;
   }
 
-  // Check password (plain text for demo)
+  if (!company.isActive) {
+    const err = new Error('Account is disabled. Contact the administrator.');
+    err.statusCode = 403;
+    throw err;
+  }
+
+  // Plain-text password check (demo mode)
   if (company.passwordHash !== password) {
-    const err = new Error('Invalid password. Use: demo123');
+    const err = new Error('Invalid email or password.');
     err.statusCode = 401;
     throw err;
   }
@@ -78,4 +50,4 @@ async function getCompanyById(companyId) {
   return Company.findOne({ companyId });
 }
 
-module.exports = { login, getCompanyById, ensureDemoUsers, DEMO_USERS };
+module.exports = { login, getCompanyById };
