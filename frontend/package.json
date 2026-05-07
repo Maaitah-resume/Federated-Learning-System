@@ -1,7 +1,8 @@
 {
   "name": "fl-frontend",
-  "type": "module",
+  "private": true,
   "version": "0.0.0",
+  "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
     "build": "vite build",
@@ -11,26 +12,26 @@
   },
   "dependencies": {
     "@tensorflow/tfjs": "^4.22.0",
-    "@google/genai": "^1.29.0",
-    "@tailwindcss/vite": "^4.1.14",
     "@vitejs/plugin-react": "^5.0.4",
-    "axios": "^1.7.7",
-    "lucide-react": "^0.408.0",
-    "motion": "^11.11.13",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "react-router-dom": "^6.28.0",
-    "recharts": "^2.12.7",
-    "socket.io-client": "^4.8.1"
+    "axios": "^1.14.0",
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.546.0",
+    "motion": "^12.23.24",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-router-dom": "^7.14.0",
+    "recharts": "^3.8.1",
+    "socket.io-client": "^4.8.3",
+    "tailwind-merge": "^3.5.0"
   },
   "devDependencies": {
-    "@types/react": "^18.3.12",
-    "@types/react-dom": "^18.3.1",
-    "autoprefixer": "^10.4.20",
-    "postcss": "^8.4.47",
-    "tailwindcss": "^3.4.14",
-    "tsx": "^4.19.1",
-    "typescript": "^5.6.3",
-    "vite": "^5.4.8"
+    "@tailwindcss/vite": "^4.1.14",
+    "@types/node": "^22.14.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "tailwindcss": "^4.1.14",
+    "tsx": "^4.21.0",
+    "typescript": "~5.8.2",
+    "vite": "^6.2.0"
   }
 }
