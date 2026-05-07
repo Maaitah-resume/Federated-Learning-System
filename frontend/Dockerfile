@@ -6,32 +6,24 @@ WORKDIR /app
 # Copy package files
 COPY package*.json ./
 
-# Install dependencies
-RUN npm install
+# Delete stale lock file and do a clean install
+# This prevents version mismatches between package.json and package-lock.json
+RUN rm -f package-lock.json && npm install
 
 # Copy all source code
 COPY . .
 
-# List files before build (debug)
-RUN echo "=== Files before build ===" && ls -la
-
 # Run the build
 RUN npm run build
 
-# List dist folder after build (debug)
-RUN echo "=== Dist folder contents ===" && ls -la dist/ || echo "DIST FOLDER NOT FOUND!"
-
-# Stage 2: Production
+# Stage 2: Production (nginx serves the built static files)
 FROM nginx:alpine
 
-# Copy built files
+# Copy built files from builder stage
 COPY --from=builder /app/dist /usr/share/nginx/html
 
-# Copy nginx config
+# Copy nginx configuration
 COPY --from=builder /app/nginx.conf /etc/nginx/conf.d/default.conf
-
-# List what was copied (debug)
-RUN echo "=== Nginx HTML folder ===" && ls -la /usr/share/nginx/html
 
 EXPOSE 80
 
