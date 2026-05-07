@@ -14,7 +14,12 @@ router.get('/', authenticate, async (req, res, next) => {
     return res.status(200).json({
       ...state,
       activeJob: activeJob
-        ? { jobId: activeJob.jobId, status: activeJob.status }
+        ? {
+            jobId:        activeJob.jobId,
+            status:       activeJob.status,
+            currentRound: activeJob.currentRound || 0,
+            totalRounds:  activeJob.totalRounds  || state.activeJob?.totalRounds || 10,
+          }
         : null,
     });
   } catch (err) { next(err); }
