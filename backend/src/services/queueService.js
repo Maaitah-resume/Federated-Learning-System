@@ -1,25 +1,24 @@
-const Participant        = require('../models/Participant');
-const Company            = require('../models/Company');
-const UserData           = require('../models/UserData');
-const simulatedOrch      = require('./simulatedOrchestrator');
-const emitter            = require('../websocket/eventEmitter');
+const Participant   = require('../models/Participant');
+const Company       = require('../models/Company');
+const fedOrch       = require('./federatedOrchestrator');   // ← was simulatedOrchestrator
+const emitter       = require('../websocket/eventEmitter');
 const { PARTICIPANT_STATUS, WS_EVENTS } = require('../config/constants');
-const { getConfig }      = require('../models/SystemConfig');  // ← reads from DB
+const { getConfig } = require('../models/SystemConfig');
 
 let isStartingJob = false;
 
-// Helper: get MIN_CLIENTS from DB, fallback to env var, fallback to 3
+// Helper: get MIN_CLIENTS from DB, fallback to env var, fallback to 2
 async function getMinClients() {
   try {
     const val = await getConfig('MIN_CLIENTS');
-    return val || parseInt(process.env.MIN_CLIENTS || '3', 10);
+    return val || parseInt(process.env.MIN_CLIENTS || '2', 10);
   } catch {
-    return parseInt(process.env.MIN_CLIENTS || '3', 10);
+    return parseInt(process.env.MIN_CLIENTS || '2', 10);
   }
 }
 
 async function getQueueState() {
-  const activeJob  = simulatedOrch.getActiveJob();
+  const activeJob  = fedOrch.getActiveJob();
   const minClients = await getMinClients();
 
   const statusFilter = activeJob
@@ -46,18 +45,16 @@ async function getQueueState() {
       jobId:        activeJob.jobId,
       status:       activeJob.status,
       currentRound: activeJob.currentRound || 0,
-      totalRounds:  activeJob.totalRounds  || 10,
+      totalRounds:  activeJob.totalRounds  || 5,
     } : null,
   };
 }
 
 async function joinQueue(companyId) {
-  const userData = await UserData.findOne({ companyId });
-  if (!userData) {
-    const err = new Error('Please upload your data before joining the queue');
-    err.status = 400;
-    throw err;
-  }
+  // ── Data-upload check REMOVED ──────────────────────────────────────────────
+  // Data is now processed entirely in the browser (localTrainer.ts).
+  // Nothing is uploaded to the server, so we no longer gate queue entry
+  // on the presence of a UserData record.
 
   const existing = await Participant.findOne({ companyId, status: PARTICIPANT_STATUS.QUEUED, jobId: null });
   if (existing) {
@@ -66,7 +63,7 @@ async function joinQueue(companyId) {
     throw err;
   }
 
-  const activeJob = simulatedOrch.getActiveJob();
+  const activeJob = fedOrch.getActiveJob();
   if (activeJob && activeJob.participantIds.includes(companyId)) {
     const err = new Error('Training already in progress for your company');
     err.status = 409;
@@ -115,7 +112,7 @@ async function checkAndStart() {
     return;
   }
 
-  const activeJob = simulatedOrch.getActiveJob();
+  const activeJob = fedOrch.getActiveJob();
   if (activeJob) {
     console.log('[Queue] Job already running');
     return;
@@ -127,7 +124,7 @@ async function checkAndStart() {
   try {
     const participants   = await Participant.find({ status: PARTICIPANT_STATUS.QUEUED, jobId: null }).limit(minClients);
     const participantIds = participants.map((p) => p.companyId);
-    await simulatedOrch.startJob(participantIds);
+    await fedOrch.startJob(participantIds);
   } catch (err) {
     console.error('[Queue] Failed to start job:', err.message);
   } finally {
