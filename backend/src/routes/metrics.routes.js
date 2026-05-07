@@ -52,61 +52,27 @@ router.get('/current', authenticate, async (req, res, next) => {
 // ============================================
 router.get('/admin/current', authenticate, async (req, res, next) => {
   try {
-    // Verify user is admin
-    if (req.company.role !== 'admin') {
-      return res.status(403).json({ 
-        error: { code: 'FORBIDDEN', message: 'Admin access required' } 
-      });
+    const activeJob = await jobManager.getActiveJob();
+    
+    if (!activeJob) {
+      return res.status(200).json({ jobId: null, rounds: [], participants: [] });
     }
 
-    // Get the most recent active job from any training metrics
-    const latestMetric = await TrainingMetric.findOne()
-      .sort({ createdAt: -1 });
+    const jobId = activeJob.jobId;
 
-    if (!latestMetric) {
-      return res.status(200).json({ 
-        jobId: null, 
-        rounds: [], 
-        participants: [],
-        maxRound: 0,
-        activeParticipants: []
-      });
-    }
-
-    const jobId = latestMetric.jobId;
-
-    // Get global metrics per round
-    const rounds = await TrainingMetric.find({ jobId, type: 'global' })
-      .sort({ round: 1 })
-      .select('round accuracy loss f1Score precision recall createdAt');
-
-    // Get ALL participants' local metrics for this job
-    const allParticipantMetrics = await TrainingMetric.find({
-      jobId,
-      type: 'local',
-    })
+    const rounds = await TrainingMetric.find({ jobId, type: 'global' }).sort({ round: 1 });
+    const allParticipantMetrics = await TrainingMetric.find({ jobId, type: 'local' })
       .sort({ round: 1 })
       .select('companyId round accuracy loss datasetSize durationMs');
 
-    // Get participant details (company names)
-    const participantIds = [
-      ...new Set(allParticipantMetrics.map(m => m.companyId))
-    ];
-    
-    const participants = await Participant.find({ companyId: { $in: participantIds } })
-      .select('companyId');
-
-    // Enrich metrics with participant info
+    const participantIds = [...new Set(allParticipantMetrics.map(m => m.companyId))];
     const enrichedMetrics = allParticipantMetrics.map(metric => ({
       ...metric.toObject(),
       companyName: metric.companyId,
     }));
 
     const maxRound = rounds.length > 0 ? rounds[rounds.length - 1].round : 0;
-
-    // Get active participant count for this job
-    const activeParticipants = await Participant.find({ jobId })
-      .countDocuments();
+    const activeParticipants = await Participant.find({ jobId }).countDocuments();
 
     return res.status(200).json({ 
       jobId, 
@@ -117,7 +83,6 @@ router.get('/admin/current', authenticate, async (req, res, next) => {
     });
   } catch (err) { next(err); }
 });
-
 // GET /api/metrics/:jobId — full history for a job (own metrics only)
 router.get('/:jobId', authenticate, async (req, res, next) => {
   try {
