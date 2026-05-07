@@ -30,7 +30,7 @@ export default function Queue() {
     ? Math.round(((activeJob.currentRound) / activeJob.totalRounds) * 100)
     : 0;
 
-  const MIN_REQUIRED = 3;
+  const MIN_REQUIRED = queue.minRequired || 3;   // ← dynamic from backend config
   const slotsLeft    = Math.max(0, MIN_REQUIRED - queue.count);
   const displayName  = file ? file.name : uploadedInfo?.name;
 
