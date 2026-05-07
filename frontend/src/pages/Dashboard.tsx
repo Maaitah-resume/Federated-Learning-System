@@ -71,7 +71,7 @@ export default function Dashboard() {
 
   const latestGlobal  = rounds[rounds.length - 1];
   const latestMine    = myMetrics[myMetrics.length - 1];
-  const currentRound  = latestGlobal?.round || 0;
+  const currentRound  = queue.activeJob?.currentRound;
   // Use totalRounds from the active job (set by admin), fall back to maxRound if job just finished
   const totalRounds   = queue.activeJob?.totalRounds || maxRound || currentRound || 1;
 
