@@ -13,13 +13,12 @@ let isStartingJob = false;
 async function getMinClients() {
   try {
     const val = await getConfig('MIN_CLIENTS');
-    // Force parse to Int to prevent string comparison errors
+    // Force to Integer to prevent "1" + "1" = "11" logic errors
     return parseInt(val || process.env.MIN_CLIENTS || '2', 10);
   } catch {
     return parseInt(process.env.MIN_CLIENTS || '2', 10);
   }
 }
-
 async function getQueueState() {
   const activeJob  = fedOrch.getActiveJob();
   const minClients = await getMinClients();
@@ -93,19 +92,16 @@ async function checkAndStart() {
 async function joinQueue(companyId) {
   await Participant.findOneAndUpdate(
     { companyId },
-    { 
-      status: PARTICIPANT_STATUS.QUEUED,
-      jobId: null,
-      joinedAt: new Date()
-    },
-    { upsert: true, new: true }
+    { status: PARTICIPANT_STATUS.QUEUED, jobId: null, joinedAt: new Date() },
+    { upsert: true }
   );
 
   const state = await getQueueState();
   emitter.emit(WS_EVENTS.QUEUE_UPDATED, state);
   
-  // Attempt to start immediately
-  await checkAndStart();
+  // TRIGGER IMMEDIATELY: Don't wait for the next interval
+  await checkAndStart(); 
+  
   return state;
 }
 
