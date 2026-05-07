@@ -9,14 +9,15 @@ const { apiLimiter, loginLimiter } = require('./middleware/rateLimiter');
 const errorHandler                 = require('./middleware/errorHandler');
 
 // ── Route modules ─────────────────────────────────────────────────────────────
-const authRoutes     = require('./routes/auth.routes');
-const queueRoutes    = require('./routes/queue.routes');
-const dataRoutes     = require('./routes/data.routes');
-const metricsRoutes  = require('./routes/metrics.routes');
-const trainingRoutes = require('./routes/training.routes');
-const modelRoutes    = require('./routes/model.routes');
-const healthRoutes   = require('./routes/health.routes');
-const adminRoutes    = require('./routes/admin.routes');
+const authRoutes      = require('./routes/auth.routes');
+const queueRoutes     = require('./routes/queue.routes');
+const dataRoutes      = require('./routes/data.routes');
+const metricsRoutes   = require('./routes/metrics.routes');
+const trainingRoutes  = require('./routes/training.routes');
+const modelRoutes     = require('./routes/model.routes');
+const healthRoutes    = require('./routes/health.routes');
+const adminRoutes     = require('./routes/admin.routes');
+const federatedRoutes = require('./routes/Federated.routes'); // ← NEW
 
 const app = express();
 
@@ -34,14 +35,15 @@ const frontendDist = path.join(__dirname, '..', 'frontend', 'dist');
 app.use(express.static(frontendDist));
 
 // ── API routes ────────────────────────────────────────────────────────────────
-app.use('/health',       healthRoutes);
-app.use('/api/auth',     loginLimiter, authRoutes);
-app.use('/api/queue',    apiLimiter,   queueRoutes);
-app.use('/api/data',     apiLimiter,   dataRoutes);
-app.use('/api/metrics',  apiLimiter,   metricsRoutes);
-app.use('/api/training', apiLimiter,   trainingRoutes);
-app.use('/api/models',   apiLimiter,   modelRoutes);
-app.use('/api/admin',    apiLimiter,   adminRoutes);
+app.use('/health',          healthRoutes);
+app.use('/api/auth',        loginLimiter,  authRoutes);
+app.use('/api/queue',       apiLimiter,    queueRoutes);
+app.use('/api/data',        apiLimiter,    dataRoutes);
+app.use('/api/metrics',     apiLimiter,    metricsRoutes);
+app.use('/api/training',    apiLimiter,    trainingRoutes);
+app.use('/api/models',      apiLimiter,    modelRoutes);
+app.use('/api/admin',       apiLimiter,    adminRoutes);
+app.use('/api/federated',   apiLimiter,    federatedRoutes); // ← NEW
 
 // ── Demo seed data — uses upsert to always update roles ────────────────────────
 const Company = require('./models/Company');
@@ -56,7 +58,6 @@ app.post('/api/demo/seed', async (req, res) => {
     ];
     const results = [];
     for (const c of demoCompanies) {
-      // Use upsert so roles are always updated even if user already exists
       await Company.findOneAndUpdate(
         { companyId: c.companyId },
         { $set: c },
