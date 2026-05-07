@@ -83,7 +83,7 @@ router.get('/admin/current', authenticate, async (req, res, next) => {
     });
   } catch (err) { next(err); }
 });
-// GET /api/metrics/:jobId — full history for a job (own metrics only)
+
 router.get('/:jobId', authenticate, async (req, res, next) => {
   try {
     const myCompanyId = req.company.companyId;
