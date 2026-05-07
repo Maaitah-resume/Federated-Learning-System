@@ -148,7 +148,7 @@ export class LocalTrainer {
     const colMax = rawXs.max(0);
     const range  = colMax.sub(colMin).add(1e-8);
     this.xs = rawXs.sub(colMin).div(range) as tf.Tensor2D;
-    this.ys = tf.tensor1d(labelRows, 'int32') as tf.Tensor1D;
+    this.ys = tf.tensor1d(labelRows, 'float32') as tf.Tensor1D;
     rawXs.dispose(); colMin.dispose(); colMax.dispose(); range.dispose();
 
     this.meta = {
@@ -218,8 +218,8 @@ export class LocalTrainer {
     });
 
     return {
-      accuracy:    history.history['acc'].at(-1)  as number,
-      loss:        history.history['loss'].at(-1) as number,
+      accuracy:    ((history.history['acc'] ?? history.history['accuracy'] ?? [0]).at(-1))  as number,
+      loss:        ((history.history['loss'] ?? [0]).at(-1)) as number,
       datasetSize: this.meta!.rows,
       durationMs:  Date.now() - started,
       epochsRun:   epochs,
