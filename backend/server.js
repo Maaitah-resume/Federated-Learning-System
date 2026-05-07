@@ -25,6 +25,8 @@ const io = new Server(server, {
     methods: ['GET', 'POST'],
   },
   // Allow both WebSocket and HTTP long-polling
+  pingInterval: 25000,
+  pingTimeout:  120000,
   transports: ['websocket', 'polling'],
 });
 
