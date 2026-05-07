@@ -1,6 +1,7 @@
 const express = require('express');
 const TrainingMetric = require('../models/TrainingMetric');
 const Participant = require('../models/Participant');
+const fedOrch = require('../services/federatedOrchestrator');
 const { authenticate } = require('../middleware/authMiddleware');
 
 const router = express.Router();
@@ -8,22 +9,26 @@ const router = express.Router();
 // GET /api/metrics/current
 router.get('/current', authenticate, async (req, res, next) => {
   try {
-    const myCompanyId = req.company.companyId;
+    const activeJob = fedOrch.getActiveJob();
 
-    // Find the most recent job this user participated in
-    const myLatest = await TrainingMetric.findOne({
-      companyId: myCompanyId,
-      type: 'local',
-    }).sort({ createdAt: -1 });
-
-    if (!myLatest) {
-      return res.status(200).json({ 
-        jobId: null, 
-        rounds: [], 
-        myMetrics: [],
-        maxRound: 0 
-      });
+    // If no job is active, send null so the dashboard clears past charts
+    if (!activeJob) {
+      return res.status(200).json({ jobId: null, rounds: [], myMetrics: [], maxRound: 0 });
     }
+
+    const jobId = activeJob.jobId;
+    // Now fetch ONLY metrics where jobId === activeJob.jobId
+    const rounds = await TrainingMetric.find({ jobId, type: 'global' }).sort({ round: 1 });
+    const myMetrics = await TrainingMetric.find({
+      jobId,
+      type: 'local',
+      companyId: req.company.companyId,
+    }).sort({ round: 1 });
+
+    return res.status(200).json({ jobId, rounds, myMetrics, maxRound: rounds.length });
+  } catch (err) { next(err); }
+});
+    
 
     const jobId = myLatest.jobId;
 
