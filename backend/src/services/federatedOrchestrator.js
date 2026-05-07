@@ -74,8 +74,8 @@ async function getMinClients() {
 }
 
 async function getRoundTimeoutMs() {
-  try { return (await getConfig('ROUND_TIMEOUT_MS')) || parseInt(process.env.ROUND_TIMEOUT_MS || '120000', 10); }
-  catch { return 120000; }
+  try { return (await getConfig('ROUND_TIMEOUT_MS')) || parseInt(process.env.ROUND_TIMEOUT_MS || '600000', 10); }
+  catch { return 600000; }
 }
 
 // ─── Pairwise seed generation ─────────────────────────────────────────────────
