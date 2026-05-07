@@ -2,7 +2,7 @@
  * Queue.tsx — frontend/src/pages/Queue.tsx
  * FIXES:
  * 1. Button is GRAY (not blue) when no CSV loaded — visually clear it's disabled
- * 2. Button text changes to "🔒 Load CSV First" when disabled
+ * 2. Button text changes to " Load CSV First" when disabled
  * 3. Red urgent banner when round is pending but no CSV loaded
  * 4. inQueueRef — avoids stale closure
  * 5. pendingRoundRef — saves round event, retries when CSV is loaded
@@ -54,7 +54,7 @@ export default function Queue() {
     if (!localTrainer.isReady) {
       console.warn('[Queue] round:started — no CSV yet, saving for later');
       pendingRoundRef.current = event;
-      setStatus(s=>({...s,phase:'loading',message:`⚡ Round ${event.round} started — load your CSV NOW!`}));
+      setStatus(s=>({...s,phase:'loading',message:` Round ${event.round} started — load your CSV NOW!`}));
       return;
     }
     isTrainingRef.current = true;
@@ -145,7 +145,7 @@ export default function Queue() {
             className="bg-red-50 border-2 border-red-400 rounded-2xl p-4 flex items-start gap-3">
             <AlertTriangle className="text-red-500 mt-0.5 shrink-0" size={24}/>
             <div>
-              <p className="font-bold text-red-700 text-lg">⚡ Round {pendingRoundRef.current?.round} is waiting for you!</p>
+              <p className="font-bold text-red-700 text-lg"> Round {pendingRoundRef.current?.round} is waiting for you!</p>
               <p className="text-red-600 text-sm mt-1">Training has started. <strong>Load your CSV file NOW</strong> to participate before the round times out.</p>
             </div>
           </motion.div>
@@ -160,7 +160,7 @@ export default function Queue() {
             <div className="flex items-center gap-4 mb-4">
               <div className="w-12 h-12 bg-white/20 rounded-2xl flex items-center justify-center"><Zap size={24} className="animate-pulse"/></div>
               <div className="flex-1">
-                <h3 className="font-bold text-lg">🔐 Pairwise-Masked Federated Training</h3>
+                <h3 className="font-bold text-lg"> Pairwise-Masked Federated Training</h3>
                 <p className="text-sm text-white/80">Job <span className="font-mono">{activeJob.jobId.slice(0,8)}</span> · <span className="font-bold uppercase">{activeJob.status}</span></p>
               </div>
               <div className="text-right">
