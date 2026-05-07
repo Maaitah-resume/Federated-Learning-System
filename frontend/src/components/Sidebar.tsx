@@ -59,7 +59,8 @@ export default function Sidebar() {
               <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></div>
               IN QUEUE
             </div>
-            <p className="text-xs text-slate-400">Waiting for queue.minRequired || 2 participants</p>
+            {/* FIX: Changed from hardcoded "3" to dynamic {queue.minRequired || 2} */}
+            <p className="text-xs text-slate-400">Waiting for {queue.count} / {queue.minRequired || 2} participants</p>
           </div>
         )}
 
