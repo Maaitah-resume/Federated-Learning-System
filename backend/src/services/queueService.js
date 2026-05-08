@@ -89,7 +89,7 @@ async function joinQueue(companyId) {
 }
 
 async function leaveQueue(companyId) {
-  await Participant.deleteOne({ companyId, jobId: null });
+  await Participant.deleteOne({ companyId }); // works pre-training AND mid-training
   const state = await getQueueState();
   emitter.emit(WS_EVENTS.QUEUE_UPDATED, state);
   return state;
