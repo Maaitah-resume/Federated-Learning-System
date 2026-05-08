@@ -48,7 +48,7 @@ export default function Queue() {
   const hasPendingRound = !!pendingRoundRef.current && !dataReady;
 
   // ── Core training function ─────────────────────────────────────────────────
-  const runLocalRound = useCallback(async (event:{jobId:string;round:number;totalRounds:number;globalWeights:any|null}) => {
+  const runLocalRound = useCallback(async (event:{jobId:string;round:number;totalRounds:number;globalWeights:any|null;adaptiveWeights?:Record<string,number>}) => {
     if (isTrainingRef.current) {
       // ── KEY FIX ──────────────────────────────────────────────────────────
       // Server emits round:started for Round N+1 as a Promise microtask,
@@ -79,9 +79,19 @@ export default function Queue() {
       });
 
       const rawWeights = localTrainer.extractWeights();
-      setStatus(s=>({...s,phase:'masking',message:'Applying pairwise masks…'}));
+      setStatus(s=>({...s,phase:'masking',message:'Applying adaptive weight + pairwise masks…'}));
+
+      // ── Paper Section 3.4: Pre-scale by adaptive weight α ─────────────────
+      // Server computed α via meta-NN using previous round's quality signals.
+      // Client scales weights by α BEFORE masking so:
+      //   send = α × w + mask  →  Σ(α_i × w_i) after mask cancellation
+      const myCompanyId  = localStorage.getItem('fl_participant')
+        ? JSON.parse(localStorage.getItem('fl_participant')!) : null;
+      const alpha = event.adaptiveWeights?.[myCompanyId] ?? (1 / (event.totalRounds > 0 ? 2 : 1));
+      const scaledWeights = localTrainer.applyAdaptiveWeight(rawWeights, alpha);
+
       const maskRes = await apiClient.get<{assignments:MaskAssignment[]}>('/api/federated/masks');
-      const maskedWeights = localTrainer.applyPairwiseMasks(rawWeights, maskRes.data.assignments);
+      const maskedWeights = localTrainer.applyPairwiseMasks(scaledWeights, maskRes.data.assignments);
 
       setStatus(s=>({...s,phase:'submitting',message:'Submitting masked weights…'}));
       await apiClient.post('/api/federated/submit',{jobId:event.jobId,round:event.round,maskedWeights,metrics});
