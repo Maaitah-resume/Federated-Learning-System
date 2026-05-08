@@ -1,29 +1,27 @@
 /**
- * localTrainer.ts
- * Place at: frontend/src/services/localTrainer.ts
+ * localTrainer.ts — frontend/src/services/localTrainer.ts
  *
- * Handles in-browser training (TensorFlow.js) + pairwise mask application.
+ * Implements paper Section 3.3 + 3.4:
+ *   - Pairwise masking for privacy
+ *   - Pre-scaling weights by adaptive weight α (meta-aggregator requirement)
+ *   - Computing update_consistency for meta-aggregator feature vector
  *
- * PAIRWISE MASKING PROTOCOL
- * ─────────────────────────
- * For N nodes indexed 0..N-1, for every pair (i, j) where i < j:
- *   - Server generates one shared random seed  s_ij
- *   - Node i  → ADDS    PRG(s_ij, weightShape)   to its weights  ("add" role)
- *   - Node j  → SUBTRACTS PRG(s_ij, weightShape) from its weights ("sub" role)
+ * ADAPTIVE WEIGHT PRE-SCALING (paper Section 3.4):
+ *   Server broadcasts α_i to each client at round start.
+ *   Client scales all weight tensors by α_i BEFORE masking:
+ *     send = α_i × w_i + mask_i
+ *   Server sums: Σ(α_i × w_i) = quality-weighted global model
+ *   (masks cancel, no /N needed since Σα = 1)
  *
- * When the meta-aggregator sums all N masked submissions:
- *   Sum = Σ w_k  +  Σ_{i<j} ( +mask_ij - mask_ij )
- *       = Σ w_k                ← masks cancel perfectly
- *   Global = Sum / N
- *
- * Raw data NEVER leaves the browser.
- * Only masked weight arrays reach the server.
+ * UPDATE CONSISTENCY (paper Section 3.4):
+ *   consistency = 1 − |updateNorm_t − updateNorm_{t−1}| / (updateNorm_{t−1} + ε)
+ *   High consistency (≈1): stable updates → more trustworthy
+ *   Low consistency (≈0): erratic updates → less trustworthy
  */
 
 import * as tf from '@tensorflow/tfjs';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
-
 export interface ParsedDataset {
   rows:     number;
   features: number;
@@ -32,32 +30,27 @@ export interface ParsedDataset {
 }
 
 export interface RoundMetrics {
-  accuracy:    number;
-  loss:        number;
-  datasetSize: number;
-  durationMs:  number;
-  epochsRun:   number;
+  accuracy:          number;
+  loss:              number;
+  datasetSize:       number;
+  durationMs:        number;
+  epochsRun:         number;
+  updateNorm:        number;   // L2 norm of weight update (||w_t − global_t-1||)
+  updateConsistency: number;   // stability across rounds [0,1]
 }
 
-/** Serialised weight tensors — what we send over the wire */
 export interface SerializedWeights {
-  shapes: number[][];   // shape of every weight tensor
-  values: number[][];   // flat Float32 values for every tensor
+  shapes: number[][];
+  values: number[][];
 }
 
-/** One pairwise mask assignment issued by the server for this node */
 export interface MaskAssignment {
-  peerId: string;       // the other node in this pair
-  seed:   number;       // shared PRNG seed (same seed on both sides)
-  role:   'add' | 'sub'; // 'add' if our index < peer index, else 'sub'
+  peerId: string;
+  seed:   number;
+  role:   'add' | 'sub';
 }
 
-// ─── Seeded PRNG (Mulberry32) ─────────────────────────────────────────────────
-//
-// Deterministic, seedable PRNG — identical algorithm runs on the server
-// (federatedOrchestrator.js) so both sides produce the exact same mask
-// from the same seed without communicating the mask values themselves.
-
+// ─── Mulberry32 PRNG (identical to federatedOrchestrator.js) ─────────────────
 function mulberry32(seed: number): () => number {
   let s = seed >>> 0;
   return () => {
@@ -67,44 +60,26 @@ function mulberry32(seed: number): () => number {
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
 }
-
-/**
- * Generates a flat mask array of `length` values in the range
- * [-MASK_SCALE, +MASK_SCALE] using the seeded PRNG.
- * Using a small scale keeps masks the same order of magnitude as
- * typical neural network weights (no float32 overflow on sum).
- */
 const MASK_SCALE = 0.5;
 
-function generateFlatMask(seed: number, length: number): number[] {
-  const rng  = mulberry32(seed);
-  const mask = new Array<number>(length);
-  for (let i = 0; i < length; i++) {
-    mask[i] = (rng() * 2 - 1) * MASK_SCALE; // uniform in [-0.5, +0.5]
-  }
-  return mask;
-}
-
 // ─── LocalTrainer ─────────────────────────────────────────────────────────────
-
 export class LocalTrainer {
-  private model: tf.LayersModel | null = null;
-  private xs:    tf.Tensor2D   | null = null;
-  private ys:    tf.Tensor1D   | null = null;
-  private meta:  ParsedDataset | null = null;
+  private model:        tf.LayersModel | null = null;
+  private xs:           tf.Tensor2D   | null = null;
+  private ys:           tf.Tensor1D   | null = null;
+  private meta:         ParsedDataset | null = null;
+  private prevGlobalW:  SerializedWeights | null = null; // for updateNorm
+  private prevUpdateNorm: number = 0;                    // for consistency
 
-  // ── CSV loading ─────────────────────────────────────────────────────────
-
-  /** Parses a CSV File in-browser. Last column = label. Raw data never leaves. */
+  // ── CSV loading ─────────────────────────────────────────────────────────────
   async loadCSV(file: File): Promise<ParsedDataset> {
     const text  = await file.text();
     const lines = text.trim().split('\n');
     if (lines.length < 2) throw new Error('CSV too small (need header + data rows)');
 
-    const header   = lines[0].split(',').map((h) => h.trim().replace(/"/g, ''));
+    const header   = lines[0].split(',').map(h => h.trim().replace(/"/g, ''));
     const labelCol = header.length - 1;
 
-    // Build label → int map
     const labelSet = new Set<string>();
     for (let i = 1; i < lines.length; i++) {
       const cols = lines[i].split(',');
@@ -113,15 +88,13 @@ export class LocalTrainer {
     const labelMap: Record<string, number> = {};
     [...labelSet].sort().forEach((lbl, idx) => { labelMap[lbl] = idx; });
 
-    // Build feature matrix + label vector
-    const featureCols = labelCol;
+    const featureCols  = labelCol;
     const featureRows: number[][] = [];
     const labelRows:   number[]   = [];
 
     for (let i = 1; i < lines.length; i++) {
       const cols = lines[i].split(',');
       if (cols.length < header.length) continue;
-
       const feats: number[] = [];
       let valid = true;
       for (let j = 0; j < featureCols; j++) {
@@ -130,7 +103,6 @@ export class LocalTrainer {
         feats.push(v);
       }
       if (!valid) continue;
-
       const lbl = cols[labelCol]?.trim().replace(/"/g, '') || 'UNKNOWN';
       featureRows.push(feats);
       labelRows.push(labelMap[lbl] ?? 0);
@@ -138,17 +110,15 @@ export class LocalTrainer {
 
     if (featureRows.length === 0) throw new Error('No valid rows found in CSV');
 
-    // Dispose old tensors
-    this.xs?.dispose();
-    this.ys?.dispose();
+    this.xs?.dispose(); this.ys?.dispose();
 
-    // Min-max normalise per column
     const rawXs  = tf.tensor2d(featureRows);
     const colMin = rawXs.min(0);
     const colMax = rawXs.max(0);
     const range  = colMax.sub(colMin).add(1e-8);
-    this.xs = rawXs.sub(colMin).div(range) as tf.Tensor2D;
-    this.ys = tf.tensor1d(labelRows, 'float32') as tf.Tensor1D;
+    this.xs      = rawXs.sub(colMin).div(range) as tf.Tensor2D;
+    // FIX: cast labels to float32 (int32 breaks floor() in sparseCategoricalCrossentropy)
+    this.ys      = tf.tensor1d(labelRows, 'float32') as tf.Tensor1D;
     rawXs.dispose(); colMin.dispose(); colMax.dispose(); range.dispose();
 
     this.meta = {
@@ -157,17 +127,14 @@ export class LocalTrainer {
       classes:  Object.keys(labelMap).length,
       labelMap,
     };
-
     console.log(`[LocalTrainer] Loaded ${this.meta.rows} rows, ${this.meta.features} features, ${this.meta.classes} classes`);
     return this.meta;
   }
 
-  // ── Model ───────────────────────────────────────────────────────────────
-
+  // ── Model ────────────────────────────────────────────────────────────────────
   buildModel(): void {
     if (!this.meta) throw new Error('Call loadCSV before buildModel');
     this.model?.dispose();
-
     this.model = tf.sequential({
       layers: [
         tf.layers.dense({ inputShape: [this.meta.features], units: 128, activation: 'relu', kernelInitializer: 'glorotUniform' }),
@@ -179,7 +146,6 @@ export class LocalTrainer {
         tf.layers.dense({ units: this.meta.classes, activation: this.meta.classes === 2 ? 'sigmoid' : 'softmax' }),
       ],
     });
-
     this.model.compile({
       optimizer: tf.train.adam(0.001),
       loss:      this.meta.classes === 2 ? 'binaryCrossentropy' : 'sparseCategoricalCrossentropy',
@@ -188,16 +154,16 @@ export class LocalTrainer {
     console.log(`[LocalTrainer] Model built — ${this.meta.features}→${this.meta.classes}`);
   }
 
-  /** Apply global weights from the server before local training */
+  /** Apply global weights received from server at round start */
   applyGlobalWeights(serialized: SerializedWeights): void {
     if (!this.model) throw new Error('Build model first');
+    this.prevGlobalW = serialized; // store for updateNorm computation
     const tensors = serialized.values.map((flat, i) => tf.tensor(flat, serialized.shapes[i]));
     this.model.setWeights(tensors);
-    tensors.forEach((t) => t.dispose());
+    tensors.forEach(t => t.dispose());
   }
 
-  // ── Training ─────────────────────────────────────────────────────────────
-
+  // ── Training ─────────────────────────────────────────────────────────────────
   async trainRound(
     epochs    = 3,
     batchSize = 32,
@@ -211,24 +177,53 @@ export class LocalTrainer {
       epochs, batchSize, shuffle: true, validationSplit: 0.1,
       callbacks: {
         onEpochEnd: (epoch, logs) => {
-          console.log(`[LocalTrainer] Epoch ${epoch + 1}/${epochs} loss=${logs?.loss?.toFixed(4)} acc=${logs?.acc?.toFixed(4)}`);
+          console.log(`[LocalTrainer] Epoch ${epoch+1}/${epochs} loss=${logs?.loss?.toFixed(4)} acc=${logs?.acc?.toFixed(4)}`);
           onEpochEnd?.(epoch, logs as tf.Logs);
         },
       },
     });
 
-    return {
-      accuracy:    ((history.history['acc'] ?? history.history['accuracy'] ?? [0]).at(-1))  as number,
-      loss:        ((history.history['loss'] ?? [0]).at(-1)) as number,
-      datasetSize: this.meta!.rows,
-      durationMs:  Date.now() - started,
-      epochsRun:   epochs,
-    };
+    const accuracy = ((history.history['acc'] ?? history.history['accuracy'] ?? [0]).at(-1)) as number;
+    const loss     = ((history.history['loss'] ?? [0]).at(-1)) as number;
+
+    // ── Compute updateNorm and updateConsistency (paper Section 3.4) ──────────
+    const { updateNorm, updateConsistency } = this._computeUpdateMetrics();
+
+    return { accuracy, loss, datasetSize: this.meta!.rows, durationMs: Date.now()-started, epochsRun: epochs, updateNorm, updateConsistency };
   }
 
-  // ── Weight extraction ────────────────────────────────────────────────────
+  /** Compute ||w_current − w_global|| / (||w_global|| + ε) and consistency */
+  private _computeUpdateMetrics(): { updateNorm: number; updateConsistency: number } {
+    if (!this.model || !this.prevGlobalW) {
+      return { updateNorm: 1.0, updateConsistency: 1.0 }; // neutral for round 1
+    }
 
-  /** Get raw (un-masked) weights as serialisable arrays */
+    const currentWs  = this.model.getWeights();
+    const prevValues = this.prevGlobalW.values;
+
+    let numerator = 0, denominator = 0;
+    currentWs.forEach((w, tIdx) => {
+      const curr = w.dataSync();
+      const prev = prevValues[tIdx] || [];
+      for (let i = 0; i < curr.length; i++) {
+        numerator   += (curr[i] - (prev[i] || 0)) ** 2;
+        denominator += (prev[i] || 0) ** 2;
+      }
+    });
+    currentWs.forEach(w => w.dispose());
+
+    const updateNorm = Math.sqrt(numerator) / (Math.sqrt(denominator) + 1e-8);
+
+    // Consistency: how stable is this norm compared to the previous round?
+    const consistency = this.prevUpdateNorm > 0
+      ? Math.max(0, 1 - Math.abs(updateNorm - this.prevUpdateNorm) / (this.prevUpdateNorm + 1e-8))
+      : 1.0; // round 1: neutral
+
+    this.prevUpdateNorm = updateNorm;
+    return { updateNorm, updateConsistency: consistency };
+  }
+
+  // ── Weight extraction ────────────────────────────────────────────────────────
   extractWeights(): SerializedWeights {
     if (!this.model) throw new Error('No model');
     const ws = this.model.getWeights();
@@ -237,58 +232,54 @@ export class LocalTrainer {
       result.shapes.push(w.shape as number[]);
       result.values.push(Array.from(w.dataSync()));
     }
-    ws.forEach((w) => w.dispose());
+    ws.forEach(w => w.dispose());
     return result;
   }
 
-  // ── Pairwise masking ──────────────────────────────────────────────────────
-
+  // ── Pre-scale by adaptive weight (paper Section 3.4) ─────────────────────────
   /**
-   * Applies all pairwise masks to a set of weights and returns the
-   * masked version ready for submission to the meta-aggregator.
+   * Multiplies all weight values by the adaptive weight α assigned by the
+   * meta-aggregator. Must be called BEFORE applyPairwiseMasks.
    *
-   * For each mask assignment:
-   *   role='add' → masked[i] = w[i] + mask[i]     (our index < peer index)
-   *   role='sub' → masked[i] = w[i] - mask[i]     (our index > peer index)
-   *
-   * Masks are generated deterministically from the shared seed using
-   * the same Mulberry32 PRNG that runs on the server — so both sides
-   * produce identical masks without ever transmitting them.
+   * Mathematical effect:
+   *   w_scaled = α × w
+   *   After masking: send = α × w + mask
+   *   Server sums: Σ(α_i × w_i + mask_i) = Σ(α_i × w_i)  [masks cancel]
+   *   Since Σα = 1 (softmax): this equals the adaptive weighted average
    */
-  applyPairwiseMasks(
-    weights:     SerializedWeights,
-    assignments: MaskAssignment[],
-  ): SerializedWeights {
-    // Deep-copy values so we don't mutate the original
+  applyAdaptiveWeight(weights: SerializedWeights, alpha: number): SerializedWeights {
+    console.log(`[LocalTrainer] Pre-scaling weights by α=${alpha.toFixed(4)}`);
+    return {
+      shapes: weights.shapes,
+      values: weights.values.map(arr => arr.map(v => v * alpha)),
+    };
+  }
+
+  // ── Pairwise masking ──────────────────────────────────────────────────────────
+  applyPairwiseMasks(weights: SerializedWeights, assignments: MaskAssignment[]): SerializedWeights {
     const masked: SerializedWeights = {
       shapes: weights.shapes,
-      values: weights.values.map((arr) => [...arr]),
+      values: weights.values.map(arr => [...arr]),
     };
-
     for (const { seed, role } of assignments) {
-      // Walk through each tensor's flat values and add/subtract the mask
-      let tensorOffset = 0; // we use a single sequential PRNG pass across all tensors
       const rng = mulberry32(seed);
-
       for (let t = 0; t < masked.values.length; t++) {
         const flat = masked.values[t];
         for (let i = 0; i < flat.length; i++) {
           const maskVal = (rng() * 2 - 1) * MASK_SCALE;
           flat[i] = role === 'add' ? flat[i] + maskVal : flat[i] - maskVal;
         }
-        tensorOffset += flat.length;
       }
     }
-
     console.log(`[LocalTrainer] Applied ${assignments.length} pairwise mask(s)`);
     return masked;
   }
 
-  // ── Cleanup ──────────────────────────────────────────────────────────────
-
+  // ── Cleanup ───────────────────────────────────────────────────────────────────
   dispose(): void {
     this.model?.dispose(); this.xs?.dispose(); this.ys?.dispose();
     this.model = null; this.xs = null; this.ys = null;
+    this.prevGlobalW = null; this.prevUpdateNorm = 0;
   }
 
   get isReady(): boolean { return !!this.model && !!this.xs && !!this.ys; }
