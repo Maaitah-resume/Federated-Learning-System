@@ -29,9 +29,12 @@ export default function Queue() {
     phase:'idle',round:0,epoch:0,totalEpochs:3,accuracy:null,loss:null,message:''
   });
 
-  const inQueueRef    = useRef(false);
-  const isTrainingRef = useRef(false);
+  // ── Stable refs ────────────────────────────────────────────────────────────
+  const inQueueRef      = useRef(false);
+  const isTrainingRef   = useRef(false);
   const pendingRoundRef = useRef<any>(null);
+  const refreshRef      = useRef(refresh);
+  useEffect(() => { refreshRef.current = refresh; }, [refresh]);
 
   const currentId: string|null = (() => {
     try { const s=localStorage.getItem('fl_participant'); return s?JSON.parse(s):null; }
@@ -45,9 +48,14 @@ export default function Queue() {
   const slotsLeft    = Math.max(0, MIN_REQUIRED-queue.count);
   const hasPendingRound = !!pendingRoundRef.current && !dataReady;
 
+  // ── Core training round ────────────────────────────────────────────────────
   const runLocalRound = useCallback(async (event:{jobId:string;round:number;totalRounds:number;globalWeights:any|null}) => {
-    if (isTrainingRef.current) return;
+    if (isTrainingRef.current) {
+      console.log('[Queue] Already training, ignoring round', event.round);
+      return;
+    }
     if (!localTrainer.isReady) {
+      console.warn('[Queue] Trainer not ready — saving round', event.round);
       pendingRoundRef.current = event;
       setStatus(s=>({...s,phase:'loading',message:`⚡ Round ${event.round} started — load your CSV NOW!`}));
       return;
@@ -73,69 +81,119 @@ export default function Queue() {
     } catch (err:any) {
       console.error('[Queue] Round error:', err);
       setStatus(s=>({...s,phase:'idle',message:`Error: ${err.message}`}));
-    } finally { isTrainingRef.current = false; }
+    } finally {
+      isTrainingRef.current = false;
+    }
   }, []);
 
-  // FIX: When inQueue becomes TRUE, also process any pending round
-  // This handles the race condition where round:started fires before
-  // React has updated inQueue state (first-joiner race condition)
+  // Keep a ref to runLocalRound so socket callbacks don't need it as a dep
+  const runLocalRoundRef = useRef(runLocalRound);
+  useEffect(() => { runLocalRoundRef.current = runLocalRound; }, [runLocalRound]);
+
+  // ── FIX 1: inQueue race condition — process pending round when joining ─────
   useEffect(() => {
     inQueueRef.current = inQueue;
     if (inQueue && pendingRoundRef.current && localTrainer.isReady && !isTrainingRef.current) {
-      console.log('[Queue] inQueue became true — processing pending round');
+      console.log('[Queue] inQueue→true: processing saved pending round');
       const pending = pendingRoundRef.current;
       pendingRoundRef.current = null;
-      runLocalRound(pending);
+      runLocalRoundRef.current(pending);
     }
-  }, [inQueue, runLocalRound]);
+  }, [inQueue]);
 
-  const handleFileSelect = useCallback(async (selected:File) => {
+  // ── FIX 2: Stable socket listeners — ONLY depend on socket ────────────────
+  // By using refs for callbacks, we NEVER unregister/re-register between rounds.
+  // Without this, React state updates after submission would cause the listener
+  // to be briefly removed, dropping Round 2's round:started event.
+  useEffect(() => {
+    if (!socket) return;
+
+    const onRoundStarted = (data:any) => {
+      console.log('[Queue] round:started round=', data.round, 'inQueue=', inQueueRef.current);
+      if (inQueueRef.current) {
+        runLocalRoundRef.current(data);
+      } else {
+        pendingRoundRef.current = data;
+        console.log('[Queue] Saved pending round (inQueue not yet true)');
+      }
+    };
+
+    const onWeightsSub = (data:SubmissionTracker) => setSubmissions(data);
+
+    const onComplete = () => {
+      setStatus({phase:'done',round:0,epoch:0,totalEpochs:3,accuracy:null,loss:null,message:'🎉 Training complete!'});
+      pendingRoundRef.current   = null;
+      isTrainingRef.current     = false;
+      // Clear saved CSV since training is done
+      sessionStorage.removeItem('fl_csv_text');
+      sessionStorage.removeItem('fl_csv_name');
+      localTrainer.dispose();
+      refreshRef.current();
+    };
+
+    const onRoundAggregated = (data:any) => {
+      console.log(`[Queue] round:aggregated round=${data.round} acc=${(data.globalAccuracy*100).toFixed(1)}%`);
+      // Update submission counter display after aggregation
+      setSubmissions(null);
+    };
+
+    socket.on('round:started',     onRoundStarted);
+    socket.on('weights:submitted', onWeightsSub);
+    socket.on('training:complete', onComplete);
+    socket.on('round:aggregated',  onRoundAggregated);
+
+    return () => {
+      socket.off('round:started',     onRoundStarted);
+      socket.off('weights:submitted', onWeightsSub);
+      socket.off('training:complete', onComplete);
+      socket.off('round:aggregated',  onRoundAggregated);
+    };
+  }, [socket]); // ← ONLY socket — never re-registers due to state changes
+
+  // ── FIX 3: Restore CSV from sessionStorage on mount ───────────────────────
+  // If the user refreshed the page, their CSV is still in sessionStorage.
+  // Auto-restore it so they don't have to re-upload.
+  useEffect(() => {
+    const savedText = sessionStorage.getItem('fl_csv_text');
+    const savedName = sessionStorage.getItem('fl_csv_name');
+    if (savedText && savedName) {
+      console.log('[Queue] Restoring CSV from sessionStorage:', savedName);
+      const blob = new Blob([savedText], {type:'text/csv'});
+      const restoredFile = new File([blob], savedName, {type:'text/csv'});
+      handleFileSelectInternal(restoredFile, savedText);
+    }
+  }, []); // Only on mount
+
+  // ── CSV loading ───────────────────────────────────────────────────────────
+  const handleFileSelectInternal = useCallback(async (selected:File, preloadedText?:string) => {
     setFile(selected); setParseError(null); setDataReady(false); setDataInfo(null);
     setStatus(s=>({...s,phase:'loading',message:'Parsing CSV in browser…'}));
     try {
+      // Save to sessionStorage for refresh persistence
+      const text = preloadedText ?? await selected.text();
+      sessionStorage.setItem('fl_csv_text', text);
+      sessionStorage.setItem('fl_csv_name', selected.name);
+
       const meta = await localTrainer.loadCSV(selected);
       localTrainer.buildModel();
       setDataReady(true);
       setDataInfo({rows:meta.rows,features:meta.features,classes:meta.classes});
       setStatus(s=>({...s,phase:'idle',message:''}));
+      // Process any pending round now that trainer is ready
       if (pendingRoundRef.current && inQueueRef.current && !isTrainingRef.current) {
         const pending = pendingRoundRef.current;
         pendingRoundRef.current = null;
-        runLocalRound(pending);
+        runLocalRoundRef.current(pending);
       }
     } catch (err:any) {
       setParseError(err.message||'Failed to parse CSV');
       setStatus(s=>({...s,phase:'idle',message:''}));
     }
-  }, [runLocalRound]);
+  }, []);
 
-  useEffect(() => {
-    if (!socket) return;
-    const onRoundStarted = (data:any) => {
-      console.log('[Queue] round:started, inQueue=', inQueueRef.current, 'round=', data.round);
-      if (inQueueRef.current) runLocalRound(data);
-      else {
-        // Store for when inQueue becomes true (race condition fix)
-        pendingRoundRef.current = data;
-        console.log('[Queue] Saved pending round (inQueue not yet true)');
-      }
-    };
-    const onWeightsSub   = (data:SubmissionTracker) => setSubmissions(data);
-    const onComplete     = () => {
-      setStatus({phase:'done',round:0,epoch:0,totalEpochs:3,accuracy:null,loss:null,message:'Training complete!'});
-      pendingRoundRef.current = null;
-      localTrainer.dispose();
-      refresh();
-    };
-    socket.on('round:started',     onRoundStarted);
-    socket.on('weights:submitted', onWeightsSub);
-    socket.on('training:complete', onComplete);
-    return () => {
-      socket.off('round:started',onRoundStarted);
-      socket.off('weights:submitted',onWeightsSub);
-      socket.off('training:complete',onComplete);
-    };
-  }, [socket, runLocalRound, refresh]);
+  const handleFileSelect = useCallback((selected:File) => {
+    handleFileSelectInternal(selected);
+  }, [handleFileSelectInternal]);
 
   const joinQueue = async () => {
     if (!dataReady) return;
@@ -150,7 +208,7 @@ export default function Queue() {
   };
 
   const leaveQueue = async () => {
-    if (!confirm('Leave the queue? If training is active your round will be skipped.')) return;
+    if (!confirm('Leave? If training is active your round will be skipped.')) return;
     setLeaving(true);
     try {
       await apiClient.post('/api/queue/leave');
@@ -163,11 +221,15 @@ export default function Queue() {
     finally { setLeaving(false); }
   };
 
-  const clearFile  = (e:React.MouseEvent) => {
-    e.stopPropagation(); setFile(null); setDataReady(false);
-    setDataInfo(null); setParseError(null); localTrainer.dispose();
+  const clearFile = (e:React.MouseEvent) => {
+    e.stopPropagation();
+    setFile(null); setDataReady(false); setDataInfo(null); setParseError(null);
+    localTrainer.dispose();
     pendingRoundRef.current = null;
+    sessionStorage.removeItem('fl_csv_text');
+    sessionStorage.removeItem('fl_csv_name');
   };
+
   const handleDrop = (e:React.DragEvent) => {
     e.preventDefault(); setDragOver(false);
     const f=e.dataTransfer.files[0]; if(f) handleFileSelect(f);
@@ -217,8 +279,14 @@ export default function Queue() {
                 <p className="text-3xl font-black">{activeJob.currentRound}<span className="text-lg font-normal text-white/60"> / {activeJob.totalRounds}</span></p>
               </div>
             </div>
-            <div className="h-2.5 bg-white/20 rounded-full overflow-hidden">
+            <div className="h-2.5 bg-white/20 rounded-full overflow-hidden mb-2">
               <motion.div className="h-full bg-white rounded-full" animate={{width:`${roundPct}%`}} transition={{duration:0.5}}/>
+            </div>
+            <div className="flex justify-between text-xs text-white/60 mt-1">
+              {Array.from({length:activeJob.totalRounds},(_,i)=>i+1).map(r=>(
+                <span key={r} className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold
+                  ${r<=activeJob.currentRound?'bg-white text-indigo-700':'bg-white/20 text-white/40'}`}>{r}</span>
+              ))}
             </div>
             {submissions && (
               <div className="mt-3 pt-3 border-t border-white/20 text-xs text-white/80 flex items-center gap-2">
@@ -232,11 +300,11 @@ export default function Queue() {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
         <div className="lg:col-span-1 space-y-6">
 
-          {/* Step 1: Load CSV */}
+          {/* Step 1 */}
           <div className={`bg-white p-6 rounded-[2rem] shadow-sm border-2 transition-all ${hasPendingRound?'border-red-400':'border-slate-100'}`}>
             <div className="flex items-center gap-3 mb-4">
               <div className={`w-8 h-8 rounded-full text-white flex items-center justify-center text-sm font-bold ${hasPendingRound?'bg-red-500':'bg-indigo-600'}`}>1</div>
-              <h3 className="font-bold text-slate-900">Load Private Data {hasPendingRound&&<span className="text-red-500 text-xs font-bold animate-pulse ml-1">← NOW!</span>}</h3>
+              <h3 className="font-bold text-slate-900">Load Private Data{hasPendingRound&&<span className="text-red-500 text-xs font-bold ml-1 animate-pulse">← NOW!</span>}</h3>
             </div>
             <div onDrop={handleDrop} onDragOver={(e)=>{e.preventDefault();setDragOver(true);}} onDragLeave={()=>setDragOver(false)}
               className={`border-2 border-dashed rounded-2xl p-6 text-center cursor-pointer transition-colors
@@ -270,7 +338,7 @@ export default function Queue() {
             </div>
           </div>
 
-          {/* Step 2: Join / Training */}
+          {/* Step 2 */}
           <div className="bg-white p-6 rounded-[2rem] shadow-sm border border-slate-100 text-center relative overflow-hidden">
             <div className={`absolute top-0 left-0 w-full h-1 ${isJobRunning?'bg-gradient-to-r from-indigo-600 to-emerald-500':'bg-indigo-600'}`}/>
             <div className="flex items-center gap-3 mb-4">
@@ -289,6 +357,7 @@ export default function Queue() {
                       {status.phase==='masking'&&<Lock size={15} className="animate-pulse"/>}
                       {status.phase==='submitting'&&<Send size={15} className="animate-pulse"/>}
                       {(status.phase==='waiting'||status.phase==='loading')&&<Loader2 size={15} className="animate-spin"/>}
+                      {status.phase==='done'&&<CheckCircle2 size={15}/>}
                       <span>{status.message}</span>
                     </div>
                     {status.phase==='training'&&(
@@ -309,8 +378,7 @@ export default function Queue() {
                   <motion.div className="h-full bg-gradient-to-r from-indigo-600 to-emerald-500 rounded-full"
                     animate={{width:`${roundPct}%`}} transition={{duration:0.5}}/>
                 </div>
-                <p className="text-xs text-slate-400 mb-2">Weights are masked before leaving your device.</p>
-                {/* LEAVE BUTTON DURING TRAINING */}
+                <p className="text-xs text-slate-400">Weights are masked before leaving your device.</p>
                 {inQueue && (
                   <button onClick={leaveQueue} disabled={leaving}
                     className="w-full flex items-center justify-center gap-2 border border-red-200 text-red-500 py-2.5 rounded-xl text-sm font-medium hover:bg-red-50 transition-all disabled:opacity-50">
@@ -363,7 +431,7 @@ export default function Queue() {
           </div>
         </div>
 
-        {/* Nodes panel */}
+        {/* Nodes */}
         <div className="lg:col-span-2">
           <div className="bg-white rounded-[2rem] shadow-sm border border-slate-100 overflow-hidden">
             <div className="p-6 border-b border-slate-50 flex justify-between items-center">
@@ -377,7 +445,7 @@ export default function Queue() {
               </span>
             </div>
             {loading?(<div className="p-12 text-center text-slate-400"><Loader2 className="animate-spin mx-auto mb-3" size={24}/>Loading…</div>)
-            :queue.companies.length===0?(<div className="p-12 text-center text-slate-400"><Users size={40} className="mx-auto mb-3 opacity-30"/><p className="font-medium">No nodes connected yet</p></div>)
+            :queue.companies.length===0?(<div className="p-12 text-center text-slate-400"><Users size={40} className="mx-auto mb-3 opacity-30"/><p>No nodes connected yet</p></div>)
             :(<div className="divide-y divide-slate-50">
               {queue.companies.map((node,i)=>(
                 <motion.div key={node.companyId} initial={{opacity:0,x:-20}} animate={{opacity:1,x:0}} transition={{delay:i*0.08}}
