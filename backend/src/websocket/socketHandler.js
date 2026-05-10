@@ -6,13 +6,18 @@ function setupWebSocket(io) {
   io.on('connection', (socket) => {
     console.log('Client connected:', socket.id);
 
-    // ── FIX: Replay current round to clients that connect late ────────────────
-    // If round:started was already emitted before this client connected,
-    // they would miss it entirely and never submit weights.
+    // ── Replay current round to clients that connect / reconnect late ─────────
+    // If round:started was already emitted before this client connected they
+    // would miss it entirely and never submit weights.
     // We immediately send the active round state to every new connection.
+    //
+    // NOTE: the client-side lastSubmittedRoundRef guard ensures that a client
+    // which already submitted this round will IGNORE the replay rather than
+    // re-training and causing a 409.  Do NOT add server-side per-socket
+    // tracking here — the client-side guard is the right layer.
     try {
-      const fedOrch     = require('../services/federatedOrchestrator');
-      const activeJob   = fedOrch.getActiveJob();
+      const fedOrch       = require('../services/federatedOrchestrator');
+      const activeJob     = fedOrch.getActiveJob();
       const globalWeights = fedOrch.getGlobalWeights();
 
       if (activeJob && activeJob.status === 'TRAINING') {
@@ -22,8 +27,10 @@ function setupWebSocket(io) {
           round:           activeJob.currentRound,
           totalRounds:     activeJob.totalRounds,
           globalWeights,
-          // FIX: include the current round's adaptive weights so reconnecting
-          // clients scale by the correct α instead of falling back to uniform.
+          // FIX: include adaptive weights so reconnecting clients scale by
+          // the correct α instead of falling back to uniform (1/N).
+          // activeJob.adaptiveWeights is set by federatedOrchestrator.js
+          // at the start of each round before emitting ROUND_STARTED.
           adaptiveWeights: activeJob.adaptiveWeights || null,
         });
       }
