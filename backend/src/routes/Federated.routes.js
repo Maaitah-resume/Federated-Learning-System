@@ -1,25 +1,6 @@
 /**
  * federated.routes.js
  * Place at: backend/src/routes/federated.routes.js
- *
- * Three endpoints that power real on-device federated learning with
- * pairwise masking + meta-aggregation:
- *
- *   GET  /api/federated/weights   — node fetches current global weights
- *                                   before starting local training
- *
- *   GET  /api/federated/masks     — node fetches its pairwise mask assignments
- *                                   (one seed per peer, generated fresh each round)
- *
- *   POST /api/federated/submit    — node submits MASKED weight update + metrics
- *                                   after local training
- *
- * Register in app.js:
- *   const federatedRoutes = require('./routes/federated.routes');
- *   app.use('/api/federated', federatedRoutes);
- *
- * Also update queueService.js:
- *   const simulatedOrch = require('./federatedOrchestrator');  ← change require path
  */
 
 const express  = require('express');
@@ -30,10 +11,16 @@ const router = express.Router();
 
 // ─── GET /api/federated/weights ───────────────────────────────────────────────
 /**
- * Returns the current global model weights.
+ * Returns the current global model weights PLUS the adaptive weights for the
+ * current round.
  *
- * Round 1  → { hasWeights: false }           nodes initialise their own models
- * Round 2+ → { hasWeights: true, weights }   nodes apply global weights first
+ * FIX: added adaptiveWeights to the response so that the client-side polling
+ * recovery loop (which polls /api/federated/weights every 5 s to detect missed
+ * round:started events) can pass the correct α to runLocalRound without having
+ * to fall back to uniform scaling.
+ *
+ * Round 1  → { hasWeights: false, adaptiveWeights: {...} }
+ * Round 2+ → { hasWeights: true, weights, adaptiveWeights: {...} }
  */
 router.get('/weights', authenticate, (req, res) => {
   const activeJob     = fedOrch.getActiveJob();
@@ -43,42 +30,25 @@ router.get('/weights', authenticate, (req, res) => {
 
   if (!globalWeights) {
     return res.status(200).json({
-      hasWeights:   false,
-      jobId:        activeJob.jobId,
-      currentRound: activeJob.currentRound,
-      totalRounds:  activeJob.totalRounds,
+      hasWeights:      false,
+      jobId:           activeJob.jobId,
+      currentRound:    activeJob.currentRound,
+      totalRounds:     activeJob.totalRounds,
+      adaptiveWeights: activeJob.adaptiveWeights || null,
     });
   }
 
   return res.status(200).json({
-    hasWeights:   true,
-    jobId:        activeJob.jobId,
-    currentRound: activeJob.currentRound,
-    totalRounds:  activeJob.totalRounds,
-    weights:      globalWeights,
+    hasWeights:      true,
+    jobId:           activeJob.jobId,
+    currentRound:    activeJob.currentRound,
+    totalRounds:     activeJob.totalRounds,
+    weights:         globalWeights,
+    adaptiveWeights: activeJob.adaptiveWeights || null,
   });
 });
 
 // ─── GET /api/federated/masks ─────────────────────────────────────────────────
-/**
- * Returns this node's pairwise mask assignments for the current round.
- *
- * Response:
- * {
- *   jobId:       string,
- *   round:       number,
- *   assignments: [
- *     { peerId: string, seed: number, role: 'add' | 'sub' },
- *     ...
- *   ]
- * }
- *
- * The node uses these to call localTrainer.applyPairwiseMasks() before
- * submitting its weights. Seeds are generated fresh each round and are
- * never stored permanently — they are discarded once all submissions
- * arrive (the masks cancel on summation, so no server-side unmasking
- * step is ever needed).
- */
 router.get('/masks', authenticate, (req, res) => {
   const companyId = req.company.companyId;
   const activeJob = fedOrch.getActiveJob();
@@ -99,22 +69,6 @@ router.get('/masks', authenticate, (req, res) => {
 });
 
 // ─── POST /api/federated/submit ───────────────────────────────────────────────
-/**
- * Called by a node after it has finished local training AND applied its
- * pairwise masks. Accepts masked weight arrays + unmasked training metrics.
- *
- * Body:
- * {
- *   jobId:         string,
- *   round:         number,
- *   maskedWeights: { shapes: number[][], values: number[][] },
- *   metrics:       { accuracy, loss, datasetSize, durationMs, epochsRun }
- * }
- *
- * The server sums all incoming maskedWeights — pairwise masks cancel
- * automatically, yielding the true aggregate without ever seeing
- * any individual node's raw weights.
- */
 router.post('/submit', authenticate, (req, res) => {
   const companyId = req.company.companyId;
   const { jobId, round, maskedWeights, metrics } = req.body;
