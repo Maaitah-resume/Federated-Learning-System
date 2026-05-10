@@ -156,11 +156,26 @@ export class LocalTrainer {
 
   /** Apply global weights received from server at round start */
   applyGlobalWeights(serialized: SerializedWeights): void {
-    if (!this.model) throw new Error('Build model first');
-    this.prevGlobalW = serialized; // store for updateNorm computation
-    const tensors = serialized.values.map((flat, i) => tf.tensor(flat, serialized.shapes[i]));
-    this.model.setWeights(tensors);
+    if (!this.meta) throw new Error('Call loadCSV before applyGlobalWeights');
+    // Store BEFORE rebuild — used by _computeUpdateMetrics after this round's training
+    this.prevGlobalW = serialized;
+
+    // FIX BUG 1 + FIX BUG 2 root-cause prevention:
+    // Rebuild the model to (a) get a fresh Adam optimizer — stale momentum/
+    // variance from prior local training is relative to a different weight
+    // space and destabilises training from round 3 onward — and (b) ensure
+    // any accumulated TF.js Variable refcount debt is cleared by disposing
+    // the old model entirely before applying the new global weights.
+    this.buildModel();
+
+    // setWeights() copies data via Variable.assign() so our local tensor
+    // handles can be safely disposed immediately after.
+    const tensors = serialized.values.map((flat, i) =>
+      tf.tensor(flat, serialized.shapes[i])
+    );
+    this.model!.setWeights(tensors);
     tensors.forEach(t => t.dispose());
+    console.log('[LocalTrainer] Global weights applied — fresh optimizer ready');
   }
 
   // ── Training ─────────────────────────────────────────────────────────────────
@@ -198,19 +213,21 @@ export class LocalTrainer {
       return { updateNorm: 1.0, updateConsistency: 1.0 }; // neutral for round 1
     }
 
-    const currentWs  = this.model.getWeights();
-    const prevValues = this.prevGlobalW.values;
+    // FIX BUG 1 (cont): read via trainableWeights[].val.dataSync() —
+    // no new Tensor object created, no refcount change, no dispose needed.
+    const trainableWeights = this.model.trainableWeights;
+    const prevValues       = this.prevGlobalW.values;
 
     let numerator = 0, denominator = 0;
-    currentWs.forEach((w, tIdx) => {
-      const curr = w.dataSync();
+    trainableWeights.forEach((w, tIdx) => {
+      const curr = (w.val as tf.Tensor).dataSync();
       const prev = prevValues[tIdx] || [];
       for (let i = 0; i < curr.length; i++) {
         numerator   += (curr[i] - (prev[i] || 0)) ** 2;
         denominator += (prev[i] || 0) ** 2;
       }
     });
-    currentWs.forEach(w => w.dispose());
+    // No dispose() needed — .val IS the Variable, not a copy.
 
     const updateNorm = Math.sqrt(numerator) / (Math.sqrt(denominator) + 1e-8);
 
@@ -232,7 +249,13 @@ export class LocalTrainer {
       result.shapes.push(w.shape as number[]);
       result.values.push(Array.from(w.dataSync()));
     }
-    ws.forEach(w => w.dispose());
+    // FIX BUG 1: do NOT dispose these tensors.
+    // In TF.js 4.x/WebGL getWeights() returns read-views of the internal
+    // tf.Variable GPU buffers (same DataId). dispose() decrements the
+    // buffer refcount; combined with the dispose() inside
+    // _computeUpdateMetrics this double-decrements the refcount per round.
+    // After 2 rounds the count hits 0, the GPU buffer is freed, and
+    // model.fit() silently produces NaN — blocking all further submissions.
     return result;
   }
 
