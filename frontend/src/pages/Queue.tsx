@@ -107,10 +107,11 @@ export default function Queue() {
     } catch (err:any) {
       console.error('[Queue] Round error:', err);
       setStatus(s=>({...s,phase:'idle',message:`Error: ${err.message}`}));
-      // Re-queue this round for retry (the poll or next socket event will re-trigger it)
-      if (!pendingRoundRef.current) {
-        pendingRoundRef.current = event;
-      }
+      // FIX BUG 2: do NOT set pendingRoundRef here.
+      // Setting it would cause finally → setTimeout(runLocalRound,0) → same
+      // error → catch → finally → ... a tight infinite 0ms retry loop that
+      // never reaches GET /masks or POST /submit, so the server sees nothing.
+      // The 5-second polling safety net already retries correctly.
     } finally {
       isTrainingRef.current = false;
       if (pendingRoundRef.current && inQueueRef.current) {
