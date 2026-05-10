@@ -246,7 +246,7 @@ async function startJob(participantIds) {
 
   console.log(`[FedOrch] Starting job ${jobId} | rounds=${totalRounds} | nodes=[${participantIds.join(', ')}]`);
 
-  activeJob          = { jobId, status: 'INITIALIZING', participantIds, totalRounds, currentRound: 0, startedAt: new Date() };
+  activeJob          = { jobId, status: 'INITIALIZING', participantIds, totalRounds, currentRound: 0, startedAt: new Date(), adaptiveWeights: null };
   globalWeights      = null;
   metaAggregator     = new AdaptiveMetaAggregator();
   pendingSubmissions.clear();
@@ -281,25 +281,23 @@ async function runRounds(jobId, participantIds, totalRounds) {
 
     generateRoundSeeds(participantIds);
 
-    // ── Broadcast round + adaptive weights ────────────────────────────────────
-    // Clients MUST pre-scale their weights by adaptiveWeights[myCompanyId]
-    // BEFORE applying pairwise masks so that:
-    //   Σ(α_i × w_i + mask_i) = Σ(α_i × w_i)  [masks cancel → weighted average]
+    // ── Compute and store adaptive weights for this round ─────────────────────
+    // FIX: store alphaThisRound on activeJob so that socketHandler.js can
+    // include it in the replay sent to reconnecting clients.  Without this,
+    // replayed round:started events arrive without adaptiveWeights and clients
+    // fall back to uniform α, which gives incorrect weight scaling in rounds 2+.
     const alphaThisRound = { ...adaptiveWeightsNext };
+    activeJob.adaptiveWeights = alphaThisRound;
+
     console.log(
       `[FedOrch] Round ${round}/${totalRounds} | α=[` +
       Object.entries(alphaThisRound).map(([id, a]) => `${id}:${a.toFixed(3)}`).join(', ') + ']'
     );
 
-    // ── Store on activeJob so socketHandler replay can include it ─────────────
-    // Without this, reconnecting clients get the replay without adaptiveWeights
-    // and fall back to uniform α, causing incorrect weight scaling in round 2+.
-    activeJob.adaptiveWeights = alphaThisRound;
-
     emitter.emit(WS_EVENTS.ROUND_STARTED, {
       jobId, round, totalRounds,
       globalWeights,
-      adaptiveWeights: alphaThisRound,  // ← per-client pre-scaling factors
+      adaptiveWeights: alphaThisRound,
     });
 
     // ── Wait for all submissions ────────────────────────────────────────────────
@@ -315,9 +313,6 @@ async function runRounds(jobId, participantIds, totalRounds) {
     activeJob.status = 'AGGREGATING';
 
     // ── Aggregate (paper Section 3.4) ─────────────────────────────────────────
-    // Clients pre-scaled by α_i and applied pairwise masks.
-    // Sum of masked submissions = Σ(α_i × w_i)  ← quality-weighted global model.
-    // NO division by N (α already sums to 1 by softmax construction).
     const submissions = [...pendingSubmissions.values()];
     const template    = submissions[0].maskedWeights;
 
@@ -330,7 +325,7 @@ async function runRounds(jobId, participantIds, totalRounds) {
           const flat = maskedWeights.values[tIdx];
           for (let i = 0; i < size; i++) result[i] += flat[i];
         }
-        return Array.from(result); // already weighted average — no /N
+        return Array.from(result);
       }),
     };
 
