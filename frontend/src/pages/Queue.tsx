@@ -122,6 +122,23 @@ export default function Queue() {
   const runLocalRoundRef = useRef(runLocalRound);
   useEffect(() => { runLocalRoundRef.current = runLocalRound; }, [runLocalRound]);
 
+  // ── Warn before unload during active training to prevent round loss ────────
+  // If a user refreshes during training the in-flight TF.js session is
+  // destroyed. The recovery path (sessionStorage + pendingRoundRef) handles
+  // reconnects, but a clear warning stops accidental refreshes first.
+  useEffect(() => {
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (isTrainingRef.current) {
+        e.preventDefault();
+        // Modern browsers show their own message; this text is a fallback.
+        e.returnValue = 'Training is in progress — leaving now will skip your submission for this round.';
+        return e.returnValue;
+      }
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, []); // stable — reads isTrainingRef.current (mutable ref, no dep needed)
+
   // ── Fix: inQueue race condition for first-joiner ───────────────────────────
   useEffect(() => {
     inQueueRef.current = inQueue;
@@ -139,10 +156,24 @@ export default function Queue() {
 
     const onRoundStarted = (data:any) => {
       console.log('[Queue] round:started round=', data.round,
-        'inQueue=', inQueueRef.current, 'isTraining=', isTrainingRef.current);
+        'inQueue=', inQueueRef.current, 'isTraining=', isTrainingRef.current,
+        'modelReady=', localTrainer.isReady);
 
       if (!inQueueRef.current) {
         // Not in queue yet — save for when we join
+        pendingRoundRef.current = data;
+        return;
+      }
+
+      // ── ROOT-CAUSE FIX ────────────────────────────────────────────────────
+      // After a page refresh the socket replay can fire AFTER inQueue becomes
+      // true (queue API ~500 ms) but BEFORE the CSV/model restores from
+      // sessionStorage (~1-2 s).  Without this check, runLocalRound is called
+      // immediately with model=null → throws "Build model first" → error is
+      // caught and swallowed → pendingRoundRef is NEVER set → the CSV restore
+      // later finds nothing to process → zero submissions for the entire round.
+      if (!localTrainer.isReady) {
+        console.log('[Queue] Model not ready yet — queuing round', data.round, 'until CSV loads');
         pendingRoundRef.current = data;
         return;
       }
