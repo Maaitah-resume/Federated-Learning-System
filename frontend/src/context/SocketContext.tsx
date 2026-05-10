@@ -19,14 +19,30 @@ export function SocketProvider({ children }: { children: ReactNode }) {
       reconnection: true,
       reconnectionDelay: 1000,
       reconnectionDelayMax: 5000,
-      reconnectionAttempts: 20,
-      // FIX: Use polling FIRST — works behind all proxies/CDNs
-      // WebSocket upgrade happens automatically after connection established
-      transports: ['polling', 'websocket'],
+      reconnectionAttempts: Infinity,  // keep trying forever during a training job
+
+      // ── FIX: WebSocket FIRST ────────────────────────────────────────────────
+      // The original order ['polling', 'websocket'] causes Railway's reverse
+      // proxy to terminate the short-lived polling HTTP connections every
+      // 10-30 s, producing a constant reconnect storm and aborting in-flight
+      // weight submissions (BadRequestError: request aborted).
+      //
+      // With WebSocket first the client opens one persistent TCP connection
+      // and only falls back to polling if the server actively rejects the
+      // upgrade — which Railway does NOT do.
+      transports: ['websocket', 'polling'],
     });
 
     newSocket.on('connect', () => {
-      console.log('✅ Socket connected, transport:', newSocket.io.engine.transport.name);
+      console.log(
+        '✅ Socket connected — id:', newSocket.id,
+        '| transport:', newSocket.io.engine.transport.name,
+      );
+    });
+
+    newSocket.on('reconnect', (attempt) => {
+      console.log('🔄 Socket reconnected after', attempt, 'attempt(s)',
+        '| transport:', newSocket.io.engine.transport.name);
     });
 
     newSocket.on('disconnect', (reason) => {
