@@ -29,10 +29,17 @@ export default function Queue() {
     phase:'idle',round:0,epoch:0,totalEpochs:3,accuracy:null,loss:null,message:''
   });
 
-  const inQueueRef      = useRef(false);
-  const isTrainingRef   = useRef(false);
-  const pendingRoundRef = useRef<any>(null);  // next round event waiting to be processed
-  const refreshRef      = useRef(refresh);
+  const inQueueRef           = useRef(false);
+  const isTrainingRef        = useRef(false);
+  const pendingRoundRef      = useRef<any>(null);
+  // ── FIX: track the last successfully submitted round ──────────────────────
+  // Prevents stale replays from re-running an already-submitted round.
+  // When a client reconnects mid-job the server replays the CURRENT round.
+  // Without this guard, if that round was already submitted the client would
+  // re-train and submit again with the old round number → HTTP 409, which
+  // then blocks processing of the real next round.
+  const lastSubmittedRoundRef = useRef(0);
+  const refreshRef            = useRef(refresh);
   useEffect(() => { refreshRef.current = refresh; }, [refresh]);
 
   const currentId: string|null = (() => {
@@ -49,12 +56,16 @@ export default function Queue() {
 
   // ── Core training function ─────────────────────────────────────────────────
   const runLocalRound = useCallback(async (event:{jobId:string;round:number;totalRounds:number;globalWeights:any|null;adaptiveWeights?:Record<string,number>}) => {
+    // ── FIX: guard against stale-round replay ─────────────────────────────
+    // If we already submitted this round (or an older one), skip entirely.
+    // This fires when the socket reconnects and the server replays the
+    // current round, but we already submitted it in this page session.
+    if (event.round <= lastSubmittedRoundRef.current) {
+      console.log('[Queue] Already submitted round', event.round, '— ignoring replay');
+      return;
+    }
+
     if (isTrainingRef.current) {
-      // ── KEY FIX ──────────────────────────────────────────────────────────
-      // Server emits round:started for Round N+1 as a Promise microtask,
-      // which runs BEFORE it sends the HTTP 200 for Round N's submit.
-      // So when this fires, isTrainingRef is still true.
-      // Save it here — the finally block below will process it immediately.
       console.log('[Queue] Round', event.round, 'arrived while training — queuing for after current round');
       pendingRoundRef.current = event;
       return;
@@ -81,23 +92,38 @@ export default function Queue() {
       const rawWeights = localTrainer.extractWeights();
       setStatus(s=>({...s,phase:'masking',message:'Applying adaptive weight + pairwise masks…'}));
 
-      // ── Paper Section 3.4: Pre-scale by adaptive weight α ─────────────────
-      // Server computed α via meta-NN using previous round's quality signals.
-      // Client scales weights by α BEFORE masking so:
-      //   send = α × w + mask  →  Σ(α_i × w_i) after mask cancellation
       const myCompanyId  = localStorage.getItem('fl_participant')
         ? JSON.parse(localStorage.getItem('fl_participant')!) : null;
-      const alpha = event.adaptiveWeights?.[myCompanyId] ?? (1 / (event.totalRounds > 0 ? 2 : 1));
+      const alpha = event.adaptiveWeights?.[myCompanyId] ?? (1 / 2);
       const scaledWeights = localTrainer.applyAdaptiveWeight(rawWeights, alpha);
 
       const maskRes = await apiClient.get<{assignments:MaskAssignment[]}>('/api/federated/masks');
       const maskedWeights = localTrainer.applyPairwiseMasks(scaledWeights, maskRes.data.assignments);
 
       setStatus(s=>({...s,phase:'submitting',message:'Submitting masked weights…'}));
-      await apiClient.post('/api/federated/submit',{jobId:event.jobId,round:event.round,maskedWeights,metrics});
 
-      setStatus(s=>({...s,phase:'waiting',accuracy:metrics.accuracy,loss:metrics.loss,
-        message:`Round ${event.round} submitted — waiting for other nodes…`}));
+      try {
+        await apiClient.post('/api/federated/submit',{jobId:event.jobId,round:event.round,maskedWeights,metrics});
+        // ── FIX: record successful submission ──────────────────────────────
+        // Any future replay of this round (after socket reconnect) will be
+        // skipped immediately via the lastSubmittedRoundRef guard above.
+        lastSubmittedRoundRef.current = event.round;
+        setStatus(s=>({...s,phase:'waiting',accuracy:metrics.accuracy,loss:metrics.loss,
+          message:`Round ${event.round} submitted — waiting for other nodes…`}));
+      } catch (submitErr: any) {
+        // ── FIX: treat 409 as a non-fatal stale-round skip ─────────────────
+        // A 409 means the server already moved to a new round (because our
+        // submit arrived late after a reconnect triggered re-training of an
+        // old round).  Log it and let the finally block process the real
+        // pending next round instead of crashing the entire training flow.
+        if (submitErr?.response?.status === 409) {
+          console.warn(`[Queue] Submit for round ${event.round} got 409 — server already on a later round. Skipping.`);
+          // Don't mark as submitted — the server moved on without us for this round.
+          setStatus(s=>({...s,phase:'waiting',message:`Round ${event.round} skipped (server advanced) — ready for next round`}));
+        } else {
+          throw submitErr;  // re-throw unexpected errors
+        }
+      }
 
     } catch (err:any) {
       console.error('[Queue] Round error:', err);
@@ -105,81 +131,88 @@ export default function Queue() {
     } finally {
       isTrainingRef.current = false;
 
-      // ── KEY FIX: process queued next round immediately after this one ────
-      // This handles the case where round N+1's event arrived while we were
-      // still in round N's try block (server sends WS event before HTTP 200).
       if (pendingRoundRef.current && inQueueRef.current) {
         const next = pendingRoundRef.current;
         pendingRoundRef.current = null;
-        console.log('[Queue] Auto-starting queued round', next.round);
-        // Use setTimeout(0) to let React flush the state updates above first
-        setTimeout(() => runLocalRound(next), 0);
+        // Only process if it's genuinely a new round
+        if (next.round > lastSubmittedRoundRef.current) {
+          console.log('[Queue] Auto-starting queued round', next.round);
+          setTimeout(() => runLocalRound(next), 0);
+        } else {
+          console.log('[Queue] Discarding stale pending round', next.round, '(already submitted up to', lastSubmittedRoundRef.current, ')');
+        }
       }
     }
-  }, []); // stable — no deps needed, all mutable state via refs
+  }, []);
 
-  // Keep ref to latest runLocalRound for socket callbacks
   const runLocalRoundRef = useRef(runLocalRound);
   useEffect(() => { runLocalRoundRef.current = runLocalRound; }, [runLocalRound]);
 
-  // ── Warn before unload during active training to prevent round loss ────────
-  // If a user refreshes during training the in-flight TF.js session is
-  // destroyed. The recovery path (sessionStorage + pendingRoundRef) handles
-  // reconnects, but a clear warning stops accidental refreshes first.
+  // ── Warn before unload during active training ──────────────────────────────
   useEffect(() => {
     const handleBeforeUnload = (e: BeforeUnloadEvent) => {
       if (isTrainingRef.current) {
         e.preventDefault();
-        // Modern browsers show their own message; this text is a fallback.
         e.returnValue = 'Training is in progress — leaving now will skip your submission for this round.';
         return e.returnValue;
       }
     };
     window.addEventListener('beforeunload', handleBeforeUnload);
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
-  }, []); // stable — reads isTrainingRef.current (mutable ref, no dep needed)
+  }, []);
 
   // ── Fix: inQueue race condition for first-joiner ───────────────────────────
   useEffect(() => {
     inQueueRef.current = inQueue;
     if (inQueue && pendingRoundRef.current && localTrainer.isReady && !isTrainingRef.current) {
-      console.log('[Queue] inQueue→true: processing pending round');
       const pending = pendingRoundRef.current;
-      pendingRoundRef.current = null;
-      setTimeout(() => runLocalRoundRef.current(pending), 0);
+      if (pending.round > lastSubmittedRoundRef.current) {
+        console.log('[Queue] inQueue→true: processing pending round', pending.round);
+        pendingRoundRef.current = null;
+        setTimeout(() => runLocalRoundRef.current(pending), 0);
+      } else {
+        pendingRoundRef.current = null;
+      }
     }
   }, [inQueue]);
 
-  // ── Stable socket listeners (never re-registered between rounds) ──────────
+  // ── Stable socket listeners ────────────────────────────────────────────────
   useEffect(() => {
     if (!socket) return;
 
     const onRoundStarted = (data:any) => {
       console.log('[Queue] round:started round=', data.round,
-        'inQueue=', inQueueRef.current, 'isTraining=', isTrainingRef.current,
-        'modelReady=', localTrainer.isReady);
+        'inQueue=', inQueueRef.current,
+        'isTraining=', isTrainingRef.current,
+        'modelReady=', localTrainer.isReady,
+        'lastSubmitted=', lastSubmittedRoundRef.current);
+
+      // ── FIX 1: ignore replays of already-submitted rounds ────────────────
+      // When the socket reconnects, the server replays the current round.
+      // If we already submitted it in this session, skip entirely.
+      if (data.round <= lastSubmittedRoundRef.current) {
+        console.log('[Queue] Ignoring round:started for already-submitted round', data.round);
+        return;
+      }
 
       if (!inQueueRef.current) {
-        // Not in queue yet — save for when we join
         pendingRoundRef.current = data;
         return;
       }
 
-      // ── ROOT-CAUSE FIX ────────────────────────────────────────────────────
-      // After a page refresh the socket replay can fire AFTER inQueue becomes
-      // true (queue API ~500 ms) but BEFORE the CSV/model restores from
-      // sessionStorage (~1-2 s).  Without this check, runLocalRound is called
-      // immediately with model=null → throws "Build model first" → error is
-      // caught and swallowed → pendingRoundRef is NEVER set → the CSV restore
-      // later finds nothing to process → zero submissions for the entire round.
+      // ── FIX 2: don't call runLocalRound before model is ready ────────────
+      // After a page refresh, inQueue becomes true (~500 ms, queue API)
+      // BEFORE localTrainer.isReady (~1-2 s, sessionStorage CSV restore).
+      // Without this guard, runLocalRound is called with model=null →
+      // throws "Build model first" → error swallowed → pendingRoundRef never
+      // set → CSV restore finds nothing to process → zero submissions.
       if (!localTrainer.isReady) {
-        console.log('[Queue] Model not ready yet — queuing round', data.round, 'until CSV loads');
+        console.log('[Queue] Model not ready — queuing round', data.round, 'until CSV loads');
         pendingRoundRef.current = data;
         return;
       }
 
       if (isTrainingRef.current) {
-        // Currently training round N — save round N+1 for after
         pendingRoundRef.current = data;
         return;
       }
@@ -191,8 +224,9 @@ export default function Queue() {
 
     const onComplete = () => {
       setStatus({phase:'done',round:0,epoch:0,totalEpochs:3,accuracy:null,loss:null,message:'🎉 Training complete!'});
-      pendingRoundRef.current   = null;
-      isTrainingRef.current     = false;
+      pendingRoundRef.current    = null;
+      isTrainingRef.current      = false;
+      lastSubmittedRoundRef.current = 0;  // reset for next job
       sessionStorage.removeItem('fl_csv_text');
       sessionStorage.removeItem('fl_csv_name');
       localTrainer.dispose();
@@ -215,7 +249,7 @@ export default function Queue() {
       socket.off('training:complete', onComplete);
       socket.off('round:aggregated',  onRoundAggregated);
     };
-  }, [socket]); // ONLY socket — never re-registers due to state changes
+  }, [socket]);
 
   // ── Restore CSV from sessionStorage on mount ──────────────────────────────
   useEffect(() => {
@@ -243,8 +277,12 @@ export default function Queue() {
       setStatus(s=>({...s,phase:'idle',message:''}));
       if (pendingRoundRef.current && inQueueRef.current && !isTrainingRef.current) {
         const pending = pendingRoundRef.current;
-        pendingRoundRef.current = null;
-        setTimeout(() => runLocalRoundRef.current(pending), 0);
+        if (pending.round > lastSubmittedRoundRef.current) {
+          pendingRoundRef.current = null;
+          setTimeout(() => runLocalRoundRef.current(pending), 0);
+        } else {
+          pendingRoundRef.current = null;
+        }
       }
     } catch (err:any) {
       setParseError(err.message||'Failed to parse CSV');
@@ -271,8 +309,9 @@ export default function Queue() {
     try {
       await apiClient.post('/api/queue/leave');
       localTrainer.dispose();
-      pendingRoundRef.current = null;
-      isTrainingRef.current   = false;
+      pendingRoundRef.current       = null;
+      isTrainingRef.current         = false;
+      lastSubmittedRoundRef.current = 0;
       setStatus({phase:'idle',round:0,epoch:0,totalEpochs:3,accuracy:null,loss:null,message:''});
       await refresh();
     } catch(e){ console.error(e); }
