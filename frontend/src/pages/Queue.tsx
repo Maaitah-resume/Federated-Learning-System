@@ -29,15 +29,9 @@ export default function Queue() {
     phase:'idle',round:0,epoch:0,totalEpochs:3,accuracy:null,loss:null,message:''
   });
 
-  const inQueueRef           = useRef(false);
-  const isTrainingRef        = useRef(false);
-  const pendingRoundRef      = useRef<any>(null);
-  // ── FIX: track the last successfully submitted round ──────────────────────
-  // Prevents stale replays from re-running an already-submitted round.
-  // When a client reconnects mid-job the server replays the CURRENT round.
-  // Without this guard, if that round was already submitted the client would
-  // re-train and submit again with the old round number → HTTP 409, which
-  // then blocks processing of the real next round.
+  const inQueueRef            = useRef(false);
+  const isTrainingRef         = useRef(false);
+  const pendingRoundRef       = useRef<any>(null);
   const lastSubmittedRoundRef = useRef(0);
   const refreshRef            = useRef(refresh);
   useEffect(() => { refreshRef.current = refresh; }, [refresh]);
@@ -56,22 +50,17 @@ export default function Queue() {
 
   // ── Core training function ─────────────────────────────────────────────────
   const runLocalRound = useCallback(async (event:{jobId:string;round:number;totalRounds:number;globalWeights:any|null;adaptiveWeights?:Record<string,number>}) => {
-    // ── FIX: guard against stale-round replay ─────────────────────────────
-    // If we already submitted this round (or an older one), skip entirely.
-    // This fires when the socket reconnects and the server replays the
-    // current round, but we already submitted it in this page session.
     if (event.round <= lastSubmittedRoundRef.current) {
-      console.log('[Queue] Already submitted round', event.round, '— ignoring replay');
+      console.log('[Queue] Already submitted round', event.round, '— ignoring');
       return;
     }
-
     if (isTrainingRef.current) {
-      console.log('[Queue] Round', event.round, 'arrived while training — queuing for after current round');
+      console.log('[Queue] Round', event.round, 'queued (training in progress)');
       pendingRoundRef.current = event;
       return;
     }
     if (!localTrainer.isReady) {
-      console.warn('[Queue] Trainer not ready — saving round', event.round);
+      console.log('[Queue] Model not ready — queuing round', event.round);
       pendingRoundRef.current = event;
       setStatus(s=>({...s,phase:'loading',message:`⚡ Round ${event.round} started — load your CSV NOW!`}));
       return;
@@ -92,9 +81,9 @@ export default function Queue() {
       const rawWeights = localTrainer.extractWeights();
       setStatus(s=>({...s,phase:'masking',message:'Applying adaptive weight + pairwise masks…'}));
 
-      const myCompanyId  = localStorage.getItem('fl_participant')
+      const myCompanyId = localStorage.getItem('fl_participant')
         ? JSON.parse(localStorage.getItem('fl_participant')!) : null;
-      const alpha = event.adaptiveWeights?.[myCompanyId] ?? (1 / 2);
+      const alpha = event.adaptiveWeights?.[myCompanyId] ?? (1/2);
       const scaledWeights = localTrainer.applyAdaptiveWeight(rawWeights, alpha);
 
       const maskRes = await apiClient.get<{assignments:MaskAssignment[]}>('/api/federated/masks');
@@ -104,42 +93,34 @@ export default function Queue() {
 
       try {
         await apiClient.post('/api/federated/submit',{jobId:event.jobId,round:event.round,maskedWeights,metrics});
-        // ── FIX: record successful submission ──────────────────────────────
-        // Any future replay of this round (after socket reconnect) will be
-        // skipped immediately via the lastSubmittedRoundRef guard above.
         lastSubmittedRoundRef.current = event.round;
         setStatus(s=>({...s,phase:'waiting',accuracy:metrics.accuracy,loss:metrics.loss,
           message:`Round ${event.round} submitted — waiting for other nodes…`}));
       } catch (submitErr: any) {
-        // ── FIX: treat 409 as a non-fatal stale-round skip ─────────────────
-        // A 409 means the server already moved to a new round (because our
-        // submit arrived late after a reconnect triggered re-training of an
-        // old round).  Log it and let the finally block process the real
-        // pending next round instead of crashing the entire training flow.
         if (submitErr?.response?.status === 409) {
-          console.warn(`[Queue] Submit for round ${event.round} got 409 — server already on a later round. Skipping.`);
-          // Don't mark as submitted — the server moved on without us for this round.
-          setStatus(s=>({...s,phase:'waiting',message:`Round ${event.round} skipped (server advanced) — ready for next round`}));
+          console.warn(`[Queue] Submit round ${event.round} → 409 (server advanced). Skipping.`);
+          setStatus(s=>({...s,phase:'waiting',message:`Round ${event.round} skipped — ready for next round`}));
         } else {
-          throw submitErr;  // re-throw unexpected errors
+          throw submitErr;
         }
       }
-
     } catch (err:any) {
       console.error('[Queue] Round error:', err);
       setStatus(s=>({...s,phase:'idle',message:`Error: ${err.message}`}));
+      // Re-queue this round for retry (the poll or next socket event will re-trigger it)
+      if (!pendingRoundRef.current) {
+        pendingRoundRef.current = event;
+      }
     } finally {
       isTrainingRef.current = false;
-
       if (pendingRoundRef.current && inQueueRef.current) {
         const next = pendingRoundRef.current;
         pendingRoundRef.current = null;
-        // Only process if it's genuinely a new round
         if (next.round > lastSubmittedRoundRef.current) {
           console.log('[Queue] Auto-starting queued round', next.round);
           setTimeout(() => runLocalRound(next), 0);
         } else {
-          console.log('[Queue] Discarding stale pending round', next.round, '(already submitted up to', lastSubmittedRoundRef.current, ')');
+          console.log('[Queue] Discarding stale pending round', next.round);
         }
       }
     }
@@ -148,20 +129,71 @@ export default function Queue() {
   const runLocalRoundRef = useRef(runLocalRound);
   useEffect(() => { runLocalRoundRef.current = runLocalRound; }, [runLocalRound]);
 
-  // ── Warn before unload during active training ──────────────────────────────
+  // ── POLLING SAFETY NET ────────────────────────────────────────────────────
+  // Every 5 s: detect if we are behind on rounds and trigger training via HTTP.
+  // This is completely independent of the socket event chain, so it catches
+  // any scenario where onRoundStarted was missed or silently failed.
+  //
+  // Why this is the definitive fix for "works for N rounds then stops":
+  //  - Socket event fires → handler runs → some guard returns early → no training
+  //  - 5 s later: poll detects round N > lastSubmitted → triggers training ✓
+  //  - No infinite loops: poll checks isTrainingRef before acting
   useEffect(() => {
-    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+    const poll = setInterval(async () => {
+      if (isTrainingRef.current)  return;  // already training
+      if (!inQueueRef.current)    return;  // not in the job
+      if (!localTrainer.isReady)  return;  // CSV/model not loaded
+
+      try {
+        const res = await apiClient.get<{
+          hasWeights:      boolean;
+          jobId:           string;
+          currentRound:    number;
+          totalRounds:     number;
+          weights?:        any;
+          adaptiveWeights?: Record<string,number> | null;
+        }>('/api/federated/weights');
+
+        const { jobId, currentRound, totalRounds, weights, adaptiveWeights } = res.data;
+
+        if (currentRound > lastSubmittedRoundRef.current) {
+          console.log(
+            `[Queue] Poll: round ${currentRound} > lastSubmitted ${lastSubmittedRoundRef.current}`,
+            '— triggering training',
+          );
+          runLocalRoundRef.current({
+            jobId,
+            round:           currentRound,
+            totalRounds,
+            globalWeights:   weights ?? null,
+            adaptiveWeights: adaptiveWeights ?? undefined,
+          });
+        }
+      } catch (e: any) {
+        // 404 = no active job (between rounds or job done) — expected, ignore
+        if (e?.response?.status !== 404) {
+          console.debug('[Queue] Poll error:', e?.message);
+        }
+      }
+    }, 5000);
+
+    return () => clearInterval(poll);
+  }, []); // stable: all mutable state is via refs
+
+  // ── Warn before refresh during training ──────────────────────────────────
+  useEffect(() => {
+    const handler = (e: BeforeUnloadEvent) => {
       if (isTrainingRef.current) {
         e.preventDefault();
-        e.returnValue = 'Training is in progress — leaving now will skip your submission for this round.';
+        e.returnValue = 'Training is in progress — leaving will skip your round submission.';
         return e.returnValue;
       }
     };
-    window.addEventListener('beforeunload', handleBeforeUnload);
-    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
   }, []);
 
-  // ── Fix: inQueue race condition for first-joiner ───────────────────────────
+  // ── inQueue sync ──────────────────────────────────────────────────────────
   useEffect(() => {
     inQueueRef.current = inQueue;
     if (inQueue && pendingRoundRef.current && localTrainer.isReady && !isTrainingRef.current) {
@@ -176,73 +208,45 @@ export default function Queue() {
     }
   }, [inQueue]);
 
-  // ── Stable socket listeners ────────────────────────────────────────────────
+  // ── Socket listeners ──────────────────────────────────────────────────────
   useEffect(() => {
     if (!socket) return;
 
     const onRoundStarted = (data:any) => {
       console.log('[Queue] round:started round=', data.round,
-        'inQueue=', inQueueRef.current,
-        'isTraining=', isTrainingRef.current,
-        'modelReady=', localTrainer.isReady,
-        'lastSubmitted=', lastSubmittedRoundRef.current);
+        'inQueue=', inQueueRef.current, 'isTraining=', isTrainingRef.current,
+        'modelReady=', localTrainer.isReady, 'lastSubmitted=', lastSubmittedRoundRef.current);
 
-      // ── FIX 1: ignore replays of already-submitted rounds ────────────────
-      // When the socket reconnects, the server replays the current round.
-      // If we already submitted it in this session, skip entirely.
       if (data.round <= lastSubmittedRoundRef.current) {
-        console.log('[Queue] Ignoring round:started for already-submitted round', data.round);
+        console.log('[Queue] Ignoring already-submitted round', data.round);
         return;
       }
-
-      if (!inQueueRef.current) {
-        pendingRoundRef.current = data;
-        return;
-      }
-
-      // ── FIX 2: don't call runLocalRound before model is ready ────────────
-      // After a page refresh, inQueue becomes true (~500 ms, queue API)
-      // BEFORE localTrainer.isReady (~1-2 s, sessionStorage CSV restore).
-      // Without this guard, runLocalRound is called with model=null →
-      // throws "Build model first" → error swallowed → pendingRoundRef never
-      // set → CSV restore finds nothing to process → zero submissions.
-      if (!localTrainer.isReady) {
-        console.log('[Queue] Model not ready — queuing round', data.round, 'until CSV loads');
-        pendingRoundRef.current = data;
-        return;
-      }
-
-      if (isTrainingRef.current) {
-        pendingRoundRef.current = data;
-        return;
-      }
-
+      if (!inQueueRef.current)   { pendingRoundRef.current = data; return; }
+      if (!localTrainer.isReady) { pendingRoundRef.current = data; return; }
+      if (isTrainingRef.current) { pendingRoundRef.current = data; return; }
       runLocalRoundRef.current(data);
     };
 
-    const onWeightsSub = (data:SubmissionTracker) => setSubmissions(data);
-
+    const onWeightsSub     = (data:SubmissionTracker) => setSubmissions(data);
+    const onRoundAggregated = (data:any) => {
+      console.log(`[Queue] round:aggregated round=${data.round} acc=${(data.globalAccuracy*100).toFixed(1)}%`);
+      setSubmissions(null);
+    };
     const onComplete = () => {
       setStatus({phase:'done',round:0,epoch:0,totalEpochs:3,accuracy:null,loss:null,message:'🎉 Training complete!'});
-      pendingRoundRef.current    = null;
-      isTrainingRef.current      = false;
-      lastSubmittedRoundRef.current = 0;  // reset for next job
+      pendingRoundRef.current       = null;
+      isTrainingRef.current         = false;
+      lastSubmittedRoundRef.current = 0;
       sessionStorage.removeItem('fl_csv_text');
       sessionStorage.removeItem('fl_csv_name');
       localTrainer.dispose();
       refreshRef.current();
     };
 
-    const onRoundAggregated = (data:any) => {
-      console.log(`[Queue] round:aggregated round=${data.round} acc=${(data.globalAccuracy*100).toFixed(1)}%`);
-      setSubmissions(null);
-    };
-
     socket.on('round:started',     onRoundStarted);
     socket.on('weights:submitted', onWeightsSub);
     socket.on('training:complete', onComplete);
     socket.on('round:aggregated',  onRoundAggregated);
-
     return () => {
       socket.off('round:started',     onRoundStarted);
       socket.off('weights:submitted', onWeightsSub);
@@ -251,7 +255,7 @@ export default function Queue() {
     };
   }, [socket]);
 
-  // ── Restore CSV from sessionStorage on mount ──────────────────────────────
+  // ── Restore CSV on mount ──────────────────────────────────────────────────
   useEffect(() => {
     const savedText = sessionStorage.getItem('fl_csv_text');
     const savedName = sessionStorage.getItem('fl_csv_name');
@@ -262,7 +266,6 @@ export default function Queue() {
     }
   }, []);
 
-  // ── CSV loading ───────────────────────────────────────────────────────────
   const handleFileSelectInternal = useCallback(async (selected:File, preloadedText?:string) => {
     setFile(selected); setParseError(null); setDataReady(false); setDataInfo(null);
     setStatus(s=>({...s,phase:'loading',message:'Parsing CSV in browser…'}));
@@ -280,9 +283,7 @@ export default function Queue() {
         if (pending.round > lastSubmittedRoundRef.current) {
           pendingRoundRef.current = null;
           setTimeout(() => runLocalRoundRef.current(pending), 0);
-        } else {
-          pendingRoundRef.current = null;
-        }
+        } else { pendingRoundRef.current = null; }
       }
     } catch (err:any) {
       setParseError(err.message||'Failed to parse CSV');
@@ -309,8 +310,8 @@ export default function Queue() {
     try {
       await apiClient.post('/api/queue/leave');
       localTrainer.dispose();
-      pendingRoundRef.current       = null;
-      isTrainingRef.current         = false;
+      pendingRoundRef.current = null;
+      isTrainingRef.current   = false;
       lastSubmittedRoundRef.current = 0;
       setStatus({phase:'idle',round:0,epoch:0,totalEpochs:3,accuracy:null,loss:null,message:''});
       await refresh();
@@ -343,7 +344,6 @@ export default function Queue() {
         <h1 className="text-3xl font-bold text-slate-900 tracking-tight">Node Waiting Room</h1>
         <p className="text-slate-500 mt-1">Your data stays on your device. Only pairwise-masked weight updates are shared.</p>
       </header>
-
       <AnimatePresence>
         {hasPendingRound && (
           <motion.div initial={{opacity:0,y:-10}} animate={{opacity:1,y:0}} exit={{opacity:0,y:-10}}
@@ -356,7 +356,6 @@ export default function Queue() {
           </motion.div>
         )}
       </AnimatePresence>
-
       <AnimatePresence>
         {isJobRunning && (
           <motion.div initial={{opacity:0,y:-20}} animate={{opacity:1,y:0}} exit={{opacity:0,y:-20}}
@@ -389,10 +388,8 @@ export default function Queue() {
           </motion.div>
         )}
       </AnimatePresence>
-
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
         <div className="lg:col-span-1 space-y-6">
-
           <div className={`bg-white p-6 rounded-[2rem] shadow-sm border-2 transition-all ${hasPendingRound?'border-red-400':'border-slate-100'}`}>
             <div className="flex items-center gap-3 mb-4">
               <div className={`w-8 h-8 rounded-full text-white flex items-center justify-center text-sm font-bold ${hasPendingRound?'bg-red-500':'bg-indigo-600'}`}>1</div>
@@ -403,9 +400,9 @@ export default function Queue() {
                 ${hasPendingRound?'border-red-400 bg-red-50':dragOver?'border-indigo-400 bg-indigo-50':'border-slate-200 hover:border-indigo-300'}`}
               onClick={()=>document.getElementById('file-input')?.click()}>
               <input id="file-input" type="file" className="hidden" accept=".csv" onChange={e=>e.target.files?.[0]&&handleFileSelect(e.target.files[0])}/>
-              {status.phase==='loading'&&!file ? (
+              {status.phase==='loading'&&!file?(
                 <div className="flex flex-col items-center gap-2 text-indigo-600"><Loader2 className="animate-spin" size={28}/><p className="text-sm">Parsing locally…</p></div>
-              ) : file ? (
+              ):file?(
                 <div className="space-y-2">
                   {dataReady&&<div className="flex items-center justify-center gap-2 text-emerald-700 bg-emerald-50 rounded-xl px-3 py-1.5 text-xs font-semibold"><CheckCircle2 size={13}/> Ready — stays local</div>}
                   {parseError&&<div className="text-red-500 bg-red-50 rounded-xl px-3 py-2 text-xs">⚠ {parseError}</div>}
@@ -420,7 +417,7 @@ export default function Queue() {
                     <button onClick={clearFile} className="text-slate-400 hover:text-red-500"><X size={16}/></button>
                   </div>
                 </div>
-              ) : (
+              ):(
                 <>
                   <Upload size={28} className={`mx-auto mb-2 ${hasPendingRound?'text-red-400':'text-slate-300'}`}/>
                   <p className={`text-sm font-medium ${hasPendingRound?'text-red-600':'text-slate-500'}`}>{hasPendingRound?'⚡ Drop CSV NOW!':'Drop your CSV here'}</p>
@@ -429,14 +426,13 @@ export default function Queue() {
               )}
             </div>
           </div>
-
           <div className="bg-white p-6 rounded-[2rem] shadow-sm border border-slate-100 text-center relative overflow-hidden">
             <div className={`absolute top-0 left-0 w-full h-1 ${isJobRunning?'bg-gradient-to-r from-indigo-600 to-emerald-500':'bg-indigo-600'}`}/>
             <div className="flex items-center gap-3 mb-4">
               <div className="w-8 h-8 rounded-full bg-indigo-600 text-white flex items-center justify-center text-sm font-bold">2</div>
               <h3 className="font-bold text-slate-900">{isJobRunning?'Training Active':'Join Waiting Room'}</h3>
             </div>
-            {isJobRunning ? (
+            {isJobRunning?(
               <motion.div initial={{opacity:0,scale:0.95}} animate={{opacity:1,scale:1}} className="space-y-4">
                 <p className="text-5xl font-black text-indigo-700">{activeJob.currentRound}<span className="text-2xl font-normal text-slate-400"> / {activeJob.totalRounds}</span></p>
                 <p className="text-xs font-bold text-slate-500 uppercase tracking-widest">Current Round</p>
@@ -469,14 +465,14 @@ export default function Queue() {
                     animate={{width:`${roundPct}%`}} transition={{duration:0.5}}/>
                 </div>
                 <p className="text-xs text-slate-400">Weights are masked before leaving your device.</p>
-                {inQueue && (
+                {inQueue&&(
                   <button onClick={leaveQueue} disabled={leaving}
                     className="w-full flex items-center justify-center gap-2 border border-red-200 text-red-500 py-2.5 rounded-xl text-sm font-medium hover:bg-red-50 transition-all disabled:opacity-50">
                     <LogOut size={14}/> {leaving?'Leaving…':'Leave Training'}
                   </button>
                 )}
               </motion.div>
-            ) : (
+            ):(
               <>
                 <motion.p key={queue.count} initial={{scale:1.2,color:'#4f46e5'}} animate={{scale:1,color:'#0f172a'}} className="text-5xl font-black mb-1">
                   {loading?'...':`${queue.count} / ${MIN_REQUIRED}`}
@@ -488,7 +484,7 @@ export default function Queue() {
                   </div>
                 )}
                 <AnimatePresence mode="wait">
-                  {!inQueue ? (
+                  {!inQueue?(
                     <motion.button key="join" initial={{opacity:0,y:10}} animate={{opacity:1,y:0}} exit={{opacity:0,y:-10}}
                       onClick={joinQueue} disabled={joining||!dataReady}
                       className={`w-full py-4 rounded-2xl font-bold text-lg transition-all
@@ -496,7 +492,7 @@ export default function Queue() {
                       {joining?<span className="flex items-center justify-center gap-2"><Loader2 className="animate-spin" size={20}/> Joining...</span>
                         :dataReady?'Join Waiting Room':'🔒 Load CSV First'}
                     </motion.button>
-                  ) : (
+                  ):(
                     <motion.div key="waiting" initial={{opacity:0,y:10}} animate={{opacity:1,y:0}} exit={{opacity:0,y:-10}} className="space-y-3">
                       <div className="flex items-center justify-center gap-3 text-emerald-600 font-bold bg-emerald-50 py-4 rounded-2xl">
                         <CheckCircle2 size={20}/> You are in the queue
@@ -512,14 +508,12 @@ export default function Queue() {
               </>
             )}
           </div>
-
           <div className="bg-slate-900 p-6 rounded-[2rem] text-white">
             <Shield className="text-indigo-400 mb-3" size={28}/>
             <h3 className="text-base font-bold mb-1">Pairwise Masking</h3>
             <p className="text-slate-400 text-sm leading-relaxed">Your data never leaves your device. Only masked weight updates are shared using pairwise secure aggregation.</p>
           </div>
         </div>
-
         <div className="lg:col-span-2">
           <div className="bg-white rounded-[2rem] shadow-sm border border-slate-100 overflow-hidden">
             <div className="p-6 border-b border-slate-50 flex justify-between items-center">
