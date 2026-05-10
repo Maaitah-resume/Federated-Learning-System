@@ -291,6 +291,11 @@ async function runRounds(jobId, participantIds, totalRounds) {
       Object.entries(alphaThisRound).map(([id, a]) => `${id}:${a.toFixed(3)}`).join(', ') + ']'
     );
 
+    // ── Store on activeJob so socketHandler replay can include it ─────────────
+    // Without this, reconnecting clients get the replay without adaptiveWeights
+    // and fall back to uniform α, causing incorrect weight scaling in round 2+.
+    activeJob.adaptiveWeights = alphaThisRound;
+
     emitter.emit(WS_EVENTS.ROUND_STARTED, {
       jobId, round, totalRounds,
       globalWeights,
