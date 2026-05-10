@@ -18,10 +18,13 @@ function setupWebSocket(io) {
       if (activeJob && activeJob.status === 'TRAINING') {
         console.log(`[WS] Replaying round ${activeJob.currentRound} to late-joining client ${socket.id}`);
         socket.emit(WS_EVENTS.ROUND_STARTED, {
-          jobId:        activeJob.jobId,
-          round:        activeJob.currentRound,
-          totalRounds:  activeJob.totalRounds,
-          globalWeights,          // null on round 1 → node trains from scratch
+          jobId:           activeJob.jobId,
+          round:           activeJob.currentRound,
+          totalRounds:     activeJob.totalRounds,
+          globalWeights,
+          // FIX: include the current round's adaptive weights so reconnecting
+          // clients scale by the correct α instead of falling back to uniform.
+          adaptiveWeights: activeJob.adaptiveWeights || null,
         });
       }
     } catch (err) {
