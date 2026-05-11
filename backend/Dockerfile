@@ -1,11 +1,12 @@
 FROM node:20-alpine
 
-RUN apk add --no-cache curl
+RUN apk add --no-cache curl python3 py3-pip
 
 WORKDIR /app
 
-COPY package*.json ./
-RUN npm install --only=production
+COPY package.json ./
+RUN npm install --omit=dev
+
 COPY src/ ./src/
 COPY server.js ./
 
