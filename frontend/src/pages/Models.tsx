@@ -41,9 +41,9 @@ function formatDate(iso: string): string {
 
 export default function Models() {
   const { user }  = useAuth();
-  const [models,   setModels]   = useState<Model[]>([]);
-  const [loading,  setLoading]  = useState(true);
-  const [search,   setSearch]   = useState('');
+  const [models,      setModels]      = useState<Model[]>([]);
+  const [loading,     setLoading]     = useState(true);
+  const [search,      setSearch]      = useState('');
   const [downloading, setDownloading] = useState<string | null>(null);
 
   const fetchModels = async () => {
@@ -59,20 +59,31 @@ export default function Models() {
 
   useEffect(() => {
     fetchModels();
-    const interval = setInterval(fetchModels, 10000); // refresh every 10s
+    const interval = setInterval(fetchModels, 10000);
     return () => clearInterval(interval);
   }, []);
 
+  // ── Download as .pkl ────────────────────────────────────────────────────────
+  // The backend converts the stored TF.js JSON weights into a proper Python
+  // pickle file (NumPy arrays) so users can load it with a single
+  // `pickle.load()` call in any Python ML stack.
   const handleDownload = async (model: Model) => {
     setDownloading(model.modelId);
     try {
       const res = await apiClient.get(`/api/models/${model.modelId}/download`, {
         responseType: 'blob',
       });
-      const url      = window.URL.createObjectURL(new Blob([res.data]));
-      const link     = document.createElement('a');
-      link.href      = url;
-      link.download  = `${model.modelId}_v${model.version}.json`;
+
+      const url  = window.URL.createObjectURL(new Blob([res.data]));
+      const link = document.createElement('a');
+      link.href  = url;
+
+      // Determine filename from Content-Disposition header if available,
+      // otherwise construct it locally.
+      const cd       = res.headers['content-disposition'] || '';
+      const cdMatch  = cd.match(/filename="([^"]+)"/);
+      link.download  = cdMatch ? cdMatch[1] : `${model.modelId}_v${model.version}.pkl`;
+
       document.body.appendChild(link);
       link.click();
       link.remove();
@@ -153,8 +164,8 @@ export default function Models() {
         <div className="grid gap-4">
           <AnimatePresence>
             {filtered.map((m, i) => {
-              const accuracy    = m.metrics.finalAccuracy;
-              const rounds      = m.metrics.roundsCompleted;
+              const accuracy      = m.metrics.finalAccuracy;
+              const rounds        = m.metrics.roundsCompleted;
               const isDownloading = downloading === m.modelId;
 
               return (
@@ -177,8 +188,9 @@ export default function Models() {
                           <h3 className="font-bold text-slate-900 text-lg">
                             {m.modelId.replace('model-', 'Model_')}
                           </h3>
-                          <span className="px-2 py-0.5 bg-indigo-50 text-indigo-600 text-[10px] font-bold uppercase rounded-md tracking-wider">
-                            PyTorch
+                          {/* Format badge — .pkl instead of PyTorch */}
+                          <span className="px-2 py-0.5 bg-emerald-50 text-emerald-700 text-[10px] font-bold uppercase rounded-md tracking-wider">
+                            .pkl
                           </span>
                           <span className="px-2 py-0.5 bg-slate-100 text-slate-500 text-[10px] font-bold uppercase rounded-md tracking-wider">
                             {m.architecture}
@@ -224,12 +236,12 @@ export default function Models() {
                       <button
                         onClick={() => handleDownload(m)}
                         disabled={isDownloading}
-                        className="flex items-center justify-center gap-2 bg-slate-900 text-white px-6 py-3 rounded-2xl font-bold hover:bg-slate-800 transition-colors disabled:opacity-60 disabled:cursor-not-allowed min-w-[140px]"
+                        className="flex items-center justify-center gap-2 bg-slate-900 text-white px-6 py-3 rounded-2xl font-bold hover:bg-slate-800 transition-colors disabled:opacity-60 disabled:cursor-not-allowed min-w-[160px]"
                       >
                         {isDownloading ? (
                           <><Loader2 className="animate-spin" size={18} /> Downloading...</>
                         ) : (
-                          <><Download size={18} /> Download</>
+                          <><Download size={18} /> Download .pkl</>
                         )}
                       </button>
                     </div>
@@ -262,6 +274,7 @@ export default function Models() {
             <h4 className="font-bold text-indigo-900">Federated Privacy Guarantee</h4>
             <p className="text-sm text-indigo-700">
               Global models are produced using secure aggregation — your raw data never left your device.
+              Downloads are Python-pickle (.pkl) files with NumPy weight arrays ready for deployment.
             </p>
           </div>
         </div>
