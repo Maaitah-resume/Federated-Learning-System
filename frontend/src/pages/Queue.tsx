@@ -218,11 +218,22 @@ export default function Queue() {
         'inQueue=', inQueueRef.current, 'isTraining=', isTrainingRef.current,
         'modelReady=', localTrainer.isReady, 'lastSubmitted=', lastSubmittedRoundRef.current);
 
+      // ── FIX: Drop events for jobs this node is not part of ────────────────
+      // This is a broadcast event — all connected sockets receive it.
+      // If this user is not in the queue (inQueueRef=false) they are either
+      // idle or in a *different* room waiting for their own partners.
+      // They must NOT queue or act on another room's training event.
+      // Previously this set pendingRoundRef even for non-participants, causing
+      // the "Round N is waiting!" banner to appear for unrelated users.
+      if (!inQueueRef.current) {
+        console.log('[Queue] Not in queue — ignoring round:started for job', data.jobId);
+        return;
+      }
+
       if (data.round <= lastSubmittedRoundRef.current) {
         console.log('[Queue] Ignoring already-submitted round', data.round);
         return;
       }
-      if (!inQueueRef.current)   { pendingRoundRef.current = data; return; }
       if (!localTrainer.isReady) { pendingRoundRef.current = data; return; }
       if (isTrainingRef.current) { pendingRoundRef.current = data; return; }
       runLocalRoundRef.current(data);
