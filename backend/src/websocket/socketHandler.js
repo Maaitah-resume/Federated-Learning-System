@@ -1,4 +1,9 @@
 // backend/src/websocket/socketHandler.js
+//
+// FIX: Forward the 'config:updated' event emitted by admin.routes.js so that
+// all connected browser clients can immediately refresh their minRequired
+// display and queue threshold without waiting for the next 3-second poll.
+//
 const emitter = require('./eventEmitter');
 const { WS_EVENTS } = require('../config/constants');
 
@@ -7,14 +12,6 @@ function setupWebSocket(io) {
     console.log('Client connected:', socket.id);
 
     // ── Replay current round to clients that connect / reconnect late ─────────
-    // If round:started was already emitted before this client connected they
-    // would miss it entirely and never submit weights.
-    // We immediately send the active round state to every new connection.
-    //
-    // NOTE: the client-side lastSubmittedRoundRef guard ensures that a client
-    // which already submitted this round will IGNORE the replay rather than
-    // re-training and causing a 409.  Do NOT add server-side per-socket
-    // tracking here — the client-side guard is the right layer.
     try {
       const fedOrch       = require('../services/federatedOrchestrator');
       const activeJob     = fedOrch.getActiveJob();
@@ -27,10 +24,6 @@ function setupWebSocket(io) {
           round:           activeJob.currentRound,
           totalRounds:     activeJob.totalRounds,
           globalWeights,
-          // FIX: include adaptive weights so reconnecting clients scale by
-          // the correct α instead of falling back to uniform (1/N).
-          // activeJob.adaptiveWeights is set by federatedOrchestrator.js
-          // at the start of each round before emitting ROUND_STARTED.
           adaptiveWeights: activeJob.adaptiveWeights || null,
         });
       }
@@ -84,11 +77,18 @@ function setupWebSocket(io) {
     io.emit(WS_EVENTS.QUEUE_UPDATED, data);
   });
 
+  // ── Admin config broadcast ─────────────────────────────────────────────────
+  // Lets the Queue page refresh minRequired immediately after an admin saves.
+  emitter.on('config:updated', (data) => {
+    console.log('[WS] config:updated → MIN_CLIENTS=' + data.config?.MIN_CLIENTS);
+    io.emit('config:updated', data);
+  });
+
   // ── Legacy session-scoped events ───────────────────────────────────────────
-  emitter.on('training-update',     (data) => { io.to(`session-${data.sessionId}`).emit('training-update', data); });
-  emitter.on('queue-update',        (data) => { io.emit('queue-update', data); });
-  emitter.on('client-update',       (data) => { io.to(`session-${data.sessionId}`).emit('client-update', data); });
-  emitter.on('aggregation-complete',(data) => { io.to(`session-${data.sessionId}`).emit('aggregation-complete', data); });
+  emitter.on('training-update',      (data) => { io.to(`session-${data.sessionId}`).emit('training-update', data); });
+  emitter.on('queue-update',         (data) => { io.emit('queue-update', data); });
+  emitter.on('client-update',        (data) => { io.to(`session-${data.sessionId}`).emit('client-update', data); });
+  emitter.on('aggregation-complete', (data) => { io.to(`session-${data.sessionId}`).emit('aggregation-complete', data); });
 }
 
 module.exports = setupWebSocket;
