@@ -23,6 +23,15 @@
  *   REINFORCE: reward = Δglobal_accuracy per round
  *   Reinforce α that improved accuracy; pull toward uniform on drop
  * ══════════════════════════════════════════════════════════════════
+ *
+ * ── FIX — Admin config not taking effect ────────────────────────────────────
+ * getTotalRounds() and getMinClients() previously wrapped getConfig() with
+ * their own parseInt(val || process.env.X || 'default') fallback.  Because
+ * getConfig() returns null when no DB doc exists (and the caller treated null
+ * as falsy), the env-var / hardcoded fallback silently shadowed whatever
+ * the admin had saved.  Now the functions delegate entirely to SystemConfig
+ * which already has the correct precedence: DB doc → DEFAULTS → null.
+ * ────────────────────────────────────────────────────────────────────────────
  */
 
 const { v4: uuidv4 }  = require('uuid');
@@ -174,17 +183,34 @@ const pendingSubmissions = new Map();
 let roundResolve         = null;
 
 // ─── Config ───────────────────────────────────────────────────────────────────
+// FIX: delegate entirely to SystemConfig.getConfig() which already handles
+// the correct precedence: DB value → DEFAULTS constant → null.
+// Avoid any local || fallback that could shadow the admin-saved DB value.
 async function getTotalRounds() {
-  try { return (await getConfig('DEFAULT_ROUNDS')) || parseInt(process.env.DEFAULT_ROUNDS || '5', 10); }
-  catch { return 5; }
+  try {
+    const val = await getConfig('DEFAULT_ROUNDS');
+    return parseInt(val ?? 5, 10);
+  } catch {
+    return 5;
+  }
 }
+
 async function getMinClients() {
-  try { return (await getConfig('MIN_CLIENTS')) || parseInt(process.env.MIN_CLIENTS || '2', 10); }
-  catch { return 2; }
+  try {
+    const val = await getConfig('MIN_CLIENTS');
+    return parseInt(val ?? 2, 10);
+  } catch {
+    return 2;
+  }
 }
+
 async function getRoundTimeoutMs() {
-  try { return (await getConfig('ROUND_TIMEOUT_MS')) || parseInt(process.env.ROUND_TIMEOUT_MS || '600000', 10); }
-  catch { return 600000; }
+  try {
+    const val = await getConfig('ROUND_TIMEOUT_MS');
+    return parseInt(val ?? 600000, 10);
+  } catch {
+    return 600000;
+  }
 }
 
 // ─── Pairwise masking ─────────────────────────────────────────────────────────
@@ -238,15 +264,29 @@ function getMasksForNode(companyId) {
 }
 
 // ─── Job lifecycle ────────────────────────────────────────────────────────────
-async function startJob(participantIds) {
+// roomId parameter added so the job record carries the originating room;
+// used for logging and future per-room queries.
+async function startJob(participantIds, roomId) {
   if (activeJob) { console.log('[FedOrch] Job already running'); return activeJob; }
 
   const jobId       = `job-${uuidv4().slice(0, 8)}`;
   const totalRounds = await getTotalRounds();
 
-  console.log(`[FedOrch] Starting job ${jobId} | rounds=${totalRounds} | nodes=[${participantIds.join(', ')}]`);
+  console.log(
+    `[FedOrch] Starting job ${jobId} | rounds=${totalRounds} | room=${roomId || 'legacy'} | ` +
+    `nodes=[${participantIds.join(', ')}]`
+  );
 
-  activeJob          = { jobId, status: 'INITIALIZING', participantIds, totalRounds, currentRound: 0, startedAt: new Date(), adaptiveWeights: null };
+  activeJob = {
+    jobId,
+    status: 'INITIALIZING',
+    participantIds,
+    totalRounds,
+    currentRound:   0,
+    startedAt:      new Date(),
+    adaptiveWeights: null,
+    roomId:         roomId || null,
+  };
   globalWeights      = null;
   metaAggregator     = new AdaptiveMetaAggregator();
   pendingSubmissions.clear();
@@ -282,10 +322,6 @@ async function runRounds(jobId, participantIds, totalRounds) {
     generateRoundSeeds(participantIds);
 
     // ── Compute and store adaptive weights for this round ─────────────────────
-    // FIX: store alphaThisRound on activeJob so that socketHandler.js can
-    // include it in the replay sent to reconnecting clients.  Without this,
-    // replayed round:started events arrive without adaptiveWeights and clients
-    // fall back to uniform α, which gives incorrect weight scaling in rounds 2+.
     const alphaThisRound = { ...adaptiveWeightsNext };
     activeJob.adaptiveWeights = alphaThisRound;
 
@@ -387,9 +423,6 @@ async function runRounds(jobId, participantIds, totalRounds) {
     });
   } catch (err) { console.error('[FedOrch] Model save error:', err.message); }
 
-
-
-  
   await Participant.updateMany({ jobId }, { $set: { status: 'DONE', jobId: null } });
   emitter.emit(WS_EVENTS.TRAINING_COMPLETE, { jobId, finalAccuracy: finalGlobal?.accuracy, finalLoss: finalGlobal?.loss });
   console.log(`[FedOrch] ${jobId} COMPLETE — acc ${((finalGlobal?.accuracy||0)*100).toFixed(2)}%`);
