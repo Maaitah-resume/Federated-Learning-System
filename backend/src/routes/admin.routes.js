@@ -1,10 +1,16 @@
 // backend/src/routes/admin.routes.js
+//
+// FIX: After saving config, emit a 'config:updated' WebSocket event so all
+// connected clients (including the queue page) can immediately reflect the
+// new MIN_CLIENTS / DEFAULT_ROUNDS without waiting for their next poll.
+//
 const express  = require('express');
 const Company  = require('../models/Company');
 const TrainingMetric = require('../models/TrainingMetric');
 const Model    = require('../models/Models');
 const { authenticate } = require('../middleware/authMiddleware');
 const { getConfig, setConfig, getAllConfig } = require('../models/SystemConfig');
+const emitter  = require('../websocket/eventEmitter');
 
 const router = express.Router();
 
@@ -55,6 +61,12 @@ router.put('/config', authenticate, adminOnly, async (req, res, next) => {
     }
 
     const updated = await getAllConfig();
+
+    // Broadcast updated config to all connected WebSocket clients so the
+    // queue page instantly reflects the new MIN_CLIENTS threshold without
+    // waiting for its next 3-second poll.
+    emitter.emit('config:updated', { config: updated, updatedBy: adminId });
+
     return res.status(200).json({ saved: true, config: updated });
   } catch (err) { next(err); }
 });
