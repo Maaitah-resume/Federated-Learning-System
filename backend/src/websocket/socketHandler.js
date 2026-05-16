@@ -1,31 +1,70 @@
 // backend/src/websocket/socketHandler.js
 //
-// FIX: Forward the 'config:updated' event emitted by admin.routes.js so that
-// all connected browser clients can immediately refresh their minRequired
-// display and queue threshold without waiting for the next 3-second poll.
+// ── FIX: Scoped round:started replay ─────────────────────────────────────────
+// Previously every newly connected WebSocket client received a replay of the
+// current round:started event regardless of job membership.  Ammar connecting
+// while Mohammad+Amer were on round 4 received that replay, set
+// pendingRoundRef, and showed "Round 4 is waiting!" — even though Ammar was
+// never in that job.
 //
+// Fix: decode companyId from the socket handshake auth token
+// (format: "demo-token-<companyId>") and only replay the event if that
+// companyId is in activeJob.participantIds.
+//
+// The frontend SocketContext.tsx now passes the token in socket auth:
+//   io(url, { auth: { token: 'demo-token-<id>' } })
+// so socket.handshake.auth.token is always available here.
+// ─────────────────────────────────────────────────────────────────────────────
+
 const emitter = require('./eventEmitter');
 const { WS_EVENTS } = require('../config/constants');
 
+/** Extract companyId from the demo-token in the socket handshake */
+function getCompanyIdFromSocket(socket) {
+  try {
+    const token =
+      socket.handshake.auth?.token ||
+      (socket.handshake.headers?.authorization || '').replace('Bearer ', '');
+
+    if (token && token.startsWith('demo-token-')) {
+      return token.replace('demo-token-', '').trim() || null;
+    }
+  } catch (_) { /* ignore */ }
+  return null;
+}
+
 function setupWebSocket(io) {
   io.on('connection', (socket) => {
-    console.log('Client connected:', socket.id);
+    const companyId = getCompanyIdFromSocket(socket);
+    console.log(`Client connected: ${socket.id} (${companyId || 'unknown'})`);
 
-    // ── Replay current round to clients that connect / reconnect late ─────────
+    // ── Replay current round ONLY to participants ─────────────────────────────
     try {
       const fedOrch       = require('../services/federatedOrchestrator');
       const activeJob     = fedOrch.getActiveJob();
       const globalWeights = fedOrch.getGlobalWeights();
 
       if (activeJob && activeJob.status === 'TRAINING') {
-        console.log(`[WS] Replaying round ${activeJob.currentRound} to late-joining client ${socket.id}`);
-        socket.emit(WS_EVENTS.ROUND_STARTED, {
-          jobId:           activeJob.jobId,
-          round:           activeJob.currentRound,
-          totalRounds:     activeJob.totalRounds,
-          globalWeights,
-          adaptiveWeights: activeJob.adaptiveWeights || null,
-        });
+        const isParticipant = companyId && activeJob.participantIds.includes(companyId);
+
+        if (isParticipant) {
+          console.log(
+            `[WS] Replaying round ${activeJob.currentRound} to participant ${companyId} (${socket.id})`
+          );
+          socket.emit(WS_EVENTS.ROUND_STARTED, {
+            jobId:           activeJob.jobId,
+            round:           activeJob.currentRound,
+            totalRounds:     activeJob.totalRounds,
+            globalWeights,
+            adaptiveWeights: activeJob.adaptiveWeights || null,
+          });
+        } else {
+          // Non-participant connecting during a job — intentionally no replay.
+          // They will see their own idle waiting room.
+          console.log(
+            `[WS] ${socket.id} (${companyId || 'unknown'}) is NOT in job ${activeJob.jobId} — skipping replay`
+          );
+        }
       }
     } catch (err) {
       console.warn('[WS] Could not replay round state:', err.message);
@@ -42,12 +81,13 @@ function setupWebSocket(io) {
     });
 
     socket.on('disconnect', () => {
-      console.log('Client disconnected:', socket.id);
+      console.log(`Client disconnected: ${socket.id} (${companyId || 'unknown'})`);
     });
   });
 
   // ── Federated learning events → broadcast to ALL clients ──────────────────
-
+  // Broadcasts are fine because Queue.tsx guards every handler with
+  // inQueueRef.current — a user not in the job silently ignores them.
   emitter.on(WS_EVENTS.TRAINING_STARTING, (data) => {
     console.log('[WS] training:starting →', data.jobId);
     io.emit(WS_EVENTS.TRAINING_STARTING, data);
@@ -78,7 +118,6 @@ function setupWebSocket(io) {
   });
 
   // ── Admin config broadcast ─────────────────────────────────────────────────
-  // Lets the Queue page refresh minRequired immediately after an admin saves.
   emitter.on('config:updated', (data) => {
     console.log('[WS] config:updated → MIN_CLIENTS=' + data.config?.MIN_CLIENTS);
     io.emit('config:updated', data);
