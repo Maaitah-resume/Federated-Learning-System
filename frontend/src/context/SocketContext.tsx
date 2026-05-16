@@ -1,4 +1,12 @@
 // frontend/src/context/SocketContext.tsx
+//
+// FIX: Pass the demo token in the Socket.IO handshake auth so the backend
+// socketHandler can identify this socket's owner and only replay
+// round:started events to actual job participants.
+//
+// Token format: "demo-token-<companyId>"
+// Read from fl_participant key (set at login) which stores the companyId.
+//
 import React, { createContext, useContext, useEffect, useState, ReactNode } from 'react';
 import { io, Socket } from 'socket.io-client';
 
@@ -14,29 +22,37 @@ export function SocketProvider({ children }: { children: ReactNode }) {
 
     console.log('🔌 Connecting to:', backendUrl);
 
+    // Build demo token from the stored participant ID
+    // (same format used by api.ts interceptor for HTTP requests)
+    const participantId = (() => {
+      try {
+        const saved = localStorage.getItem('fl_participant');
+        return saved ? JSON.parse(saved) : null;
+      } catch { return null; }
+    })();
+    const token = participantId ? `demo-token-${participantId}` : '';
+
     const newSocket = io(backendUrl, {
       autoConnect: true,
       reconnection: true,
       reconnectionDelay: 1000,
       reconnectionDelayMax: 5000,
-      reconnectionAttempts: Infinity,  // keep trying forever during a training job
+      reconnectionAttempts: Infinity,
 
-      // ── FIX: WebSocket FIRST ────────────────────────────────────────────────
-      // The original order ['polling', 'websocket'] causes Railway's reverse
-      // proxy to terminate the short-lived polling HTTP connections every
-      // 10-30 s, producing a constant reconnect storm and aborting in-flight
-      // weight submissions (BadRequestError: request aborted).
-      //
-      // With WebSocket first the client opens one persistent TCP connection
-      // and only falls back to polling if the server actively rejects the
-      // upgrade — which Railway does NOT do.
       transports: ['websocket', 'polling'],
+
+      // ── Auth token in handshake ───────────────────────────────────────────
+      // Accessible on the server as socket.handshake.auth.token
+      // The socketHandler uses this to decide whether to replay the current
+      // round:started event to this socket (only job participants get it).
+      auth: { token },
     });
 
     newSocket.on('connect', () => {
       console.log(
         '✅ Socket connected — id:', newSocket.id,
         '| transport:', newSocket.io.engine.transport.name,
+        '| user:', participantId || 'unknown',
       );
     });
 
