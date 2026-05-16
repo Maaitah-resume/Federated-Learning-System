@@ -1,4 +1,9 @@
 // backend/src/routes/queue.routes.js
+//
+// FIX: Pass req.company.companyId to queueService.getQueueState() so each
+// user receives only their own room's participants, not the global pool.
+// This is the companion change to the multi-room fix in queueService.js.
+//
 const express      = require('express');
 const queueService = require('../services/queueService');
 const fedOrch      = require('../services/federatedOrchestrator');
@@ -6,12 +11,11 @@ const { authenticate } = require('../middleware/authMiddleware');
 
 const router = express.Router();
 
-// GET /api/queue — queue state + live active job from fedOrch (NOT jobManager)
-// fedOrch is in-memory only and never writes to TrainingJob collection,
-// so jobManager.getActiveJob() always returns null — do NOT use it here.
+// GET /api/queue — queue state scoped to the requesting user's room
 router.get('/', authenticate, async (req, res, next) => {
   try {
-    const state  = await queueService.getQueueState();
+    // Pass companyId so getQueueState returns only this user's room
+    const state  = await queueService.getQueueState(req.company.companyId);
     const rawJob = fedOrch.getActiveJob();
 
     return res.status(200).json({
