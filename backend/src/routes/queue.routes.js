@@ -1,8 +1,14 @@
 // backend/src/routes/queue.routes.js
 //
-// FIX: Pass req.company.companyId to queueService.getQueueState() so each
-// user receives only their own room's participants, not the global pool.
-// This is the companion change to the multi-room fix in queueService.js.
+// FIX 1 (multi-room): Pass req.company.companyId to queueService.getQueueState()
+// so each user receives only their own room's participants.
+//
+// FIX 2 (job leakage): Only include activeJob in the response if the requesting
+// user is actually a participant in it.  Previously fedOrch.getActiveJob() was
+// returned to EVERY authenticated request, so Ammar polling GET /api/queue
+// while Mohammad+Amer were training received the live job object and the
+// frontend rendered the full training UI — "Training Active", round progress
+// bar, "Training Nodes", etc. — even though Ammar was in a different room.
 //
 const express      = require('express');
 const queueService = require('../services/queueService');
@@ -14,13 +20,22 @@ const router = express.Router();
 // GET /api/queue — queue state scoped to the requesting user's room
 router.get('/', authenticate, async (req, res, next) => {
   try {
-    // Pass companyId so getQueueState returns only this user's room
-    const state  = await queueService.getQueueState(req.company.companyId);
+    const companyId = req.company.companyId;
+
+    // Room-scoped participant list
+    const state = await queueService.getQueueState(companyId);
+
+    // ── Job visibility check ──────────────────────────────────────────────────
+    // Only expose the active job to its own participants.
+    // Anyone else (different room, not yet queued, just browsing) receives
+    // activeJob: null so the frontend shows them the normal idle waiting room
+    // with no training metrics, no progress bar, no round counter.
     const rawJob = fedOrch.getActiveJob();
+    const isParticipant = rawJob && rawJob.participantIds.includes(companyId);
 
     return res.status(200).json({
       ...state,
-      activeJob: rawJob
+      activeJob: isParticipant
         ? {
             jobId:        rawJob.jobId,
             status:       rawJob.status,
