@@ -7,6 +7,15 @@
 // Token format: "demo-token-<companyId>"
 // Read from fl_participant key (set at login) which stores the companyId.
 //
+// ── FIX: Railway WebSocket keepalive ──────────────────────────────────────────
+// Railway's load balancer drops idle WebSocket connections after ~60 s.
+// During model.fit (30-90 s on 5000 rows) no application messages are sent,
+// so Railway silently closes the TCP connection.  Socket.IO's own ping runs
+// at the server's pingInterval (now 10 s), but we add an explicit client-side
+// ping every 20 s as a belt-and-suspenders measure — this guarantees traffic
+// crosses the wire even if the Socket.IO engine ping is delayed by a busy
+// browser main thread during training.
+// ─────────────────────────────────────────────────────────────────────────────
 import React, { createContext, useContext, useEffect, useState, ReactNode } from 'react';
 import { io, Socket } from 'socket.io-client';
 
@@ -23,7 +32,6 @@ export function SocketProvider({ children }: { children: ReactNode }) {
     console.log('🔌 Connecting to:', backendUrl);
 
     // Build demo token from the stored participant ID
-    // (same format used by api.ts interceptor for HTTP requests)
     const participantId = (() => {
       try {
         const saved = localStorage.getItem('fl_participant');
@@ -33,18 +41,15 @@ export function SocketProvider({ children }: { children: ReactNode }) {
     const token = participantId ? `demo-token-${participantId}` : '';
 
     const newSocket = io(backendUrl, {
-      autoConnect: true,
-      reconnection: true,
-      reconnectionDelay: 1000,
-      reconnectionDelayMax: 5000,
-      reconnectionAttempts: Infinity,
+      autoConnect:            true,
+      reconnection:           true,
+      reconnectionDelay:      1000,
+      reconnectionDelayMax:   5000,
+      reconnectionAttempts:   Infinity,
 
       transports: ['websocket', 'polling'],
 
       // ── Auth token in handshake ───────────────────────────────────────────
-      // Accessible on the server as socket.handshake.auth.token
-      // The socketHandler uses this to decide whether to replay the current
-      // round:started event to this socket (only job participants get it).
       auth: { token },
     });
 
@@ -69,9 +74,26 @@ export function SocketProvider({ children }: { children: ReactNode }) {
       console.error('Socket connection error:', error.message);
     });
 
+    // ── Client-side keepalive ping ────────────────────────────────────────────
+    // Sends a lightweight 'ping' event every 20 s so Railway's load balancer
+    // never sees more than 20 s of silence on this connection, staying well
+    // below its ~60 s idle-close threshold.
+    // The backend does not need to handle this event — Socket.IO silently
+    // ignores unregistered events.  We use 20 s (not 10 s) to avoid
+    // overwhelming the server when many clients are connected; the server-side
+    // pingInterval (10 s) fills any remaining gap.
+    const keepalive = setInterval(() => {
+      if (newSocket.connected) {
+        newSocket.emit('keepalive');
+      }
+    }, 20000);
+
     setSocket(newSocket);
 
-    return () => { newSocket.close(); };
+    return () => {
+      clearInterval(keepalive);
+      newSocket.close();
+    };
   }, []);
 
   return (
