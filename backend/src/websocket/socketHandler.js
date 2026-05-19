@@ -48,16 +48,34 @@ function setupWebSocket(io) {
         const isParticipant = companyId && activeJob.participantIds.includes(companyId);
 
         if (isParticipant) {
-          console.log(
-            `[WS] Replaying round ${activeJob.currentRound} to participant ${companyId} (${socket.id})`
-          );
-          socket.emit(WS_EVENTS.ROUND_STARTED, {
-            jobId:           activeJob.jobId,
-            round:           activeJob.currentRound,
-            totalRounds:     activeJob.totalRounds,
-            globalWeights,
-            adaptiveWeights: activeJob.adaptiveWeights || null,
-          });
+          // KEY FIX: don't replay if the client already submitted for this round.
+          // Replaying to a client that's mid-training causes runLocalRound to fire
+          // again, which calls applyGlobalWeights → disposes the active model →
+          // "LayersVariable already disposed" → training never completes.
+          const alreadySubmitted = fedOrch.hasSubmittedForRound(companyId);
+          if (alreadySubmitted) {
+            console.log(
+              `[WS] Skipping replay for ${companyId} — already submitted round ${activeJob.currentRound}`
+            );
+            // Send a lightweight sync event instead so the client can update
+            // its UI to "waiting" state without re-triggering training.
+            socket.emit('round:alreadySubmitted', {
+              jobId:        activeJob.jobId,
+              round:        activeJob.currentRound,
+              totalRounds:  activeJob.totalRounds,
+            });
+          } else {
+            console.log(
+              `[WS] Replaying round ${activeJob.currentRound} to participant ${companyId} (${socket.id})`
+            );
+            socket.emit(WS_EVENTS.ROUND_STARTED, {
+              jobId:           activeJob.jobId,
+              round:           activeJob.currentRound,
+              totalRounds:     activeJob.totalRounds,
+              globalWeights,
+              adaptiveWeights: activeJob.adaptiveWeights || null,
+            });
+          }
         } else {
           // Non-participant connecting during a job — intentionally no replay.
           // They will see their own idle waiting room.
