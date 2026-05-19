@@ -189,6 +189,24 @@ export class LocalTrainer {
       throw new Error('No valid rows found in CSV after filtering');
     }
 
+    // ── Cap rows for responsive browser training ──────────────────────────────
+    // 5000 rows × 3 epochs × 420 batches = ~60-90s of frozen JS event loop.
+    // Capping at 2000 rows keeps training under ~25s while preserving the
+    // federated learning semantics (each node trains on a local subset).
+    // Rows are shuffled before capping so the sample is random, not the
+    // first N rows of the CSV.
+    const MAX_ROWS = 2000;
+    if (featureRows.length > MAX_ROWS) {
+      const indices = Array.from({ length: featureRows.length }, (_, i) => i)
+        .sort(() => Math.random() - 0.5)
+        .slice(0, MAX_ROWS);
+      const sampledFeatures = indices.map(i => featureRows[i]);
+      const sampledLabels   = indices.map(i => labelRows[i]);
+      featureRows.length = 0; featureRows.push(...sampledFeatures);
+      labelRows.length   = 0; labelRows.push(...sampledLabels);
+      console.log(`[LocalTrainer] Sampled ${MAX_ROWS} rows from ${featureRows.length + MAX_ROWS} for responsive training`);
+    }
+
     // ── Build tensors ─────────────────────────────────────────────────────────
     this.xs?.dispose();
     this.ys?.dispose();
@@ -316,6 +334,18 @@ export class LocalTrainer {
       batchSize,
       shuffle:         true,
       validationSplit: 0.1,
+      // ── CRITICAL: yield control back to the browser event loop after every
+      // batch. Without this, model.fit() holds the JS main thread for the
+      // entire training run (45-90s on 5000 rows × 3 epochs × 420 batches).
+      // While frozen:
+      //   • Socket.IO ping callbacks can't fire → Railway kills the TCP
+      //     connection after its ~60s idle timeout
+      //   • setInterval(5000) poll callbacks queue up → fire all at once
+      //     when the loop unfreezes → training storm → model disposed
+      // With yieldEvery:'batch', the event loop gets control every ~150ms
+      // (one GPU batch), so Socket.IO pings and poll intervals fire normally
+      // throughout training, preventing ALL of the above cascading failures.
+      yieldEvery: 'batch',
       callbacks: {
         onEpochEnd: (epoch, logs) => {
           console.log(
