@@ -93,6 +93,10 @@ export class LocalTrainer {
       case 'MASKS_APPLIED':
         this._resolve?.(payload);
         break;
+      case 'DISPOSED':
+        // FIX #3: Worker confirmed dispose — reject any pending promise
+        this._reject?.(new Error('Model disposed'));
+        break;
       case 'ERROR':
         this._reject?.(new Error(payload.message));
         break;
@@ -109,6 +113,19 @@ export class LocalTrainer {
       this._resolve = resolve;
       this._reject  = reject;
       this.worker.postMessage(msg);
+      // FIX #3: Timeout after 5 minutes so promises never hang forever
+      const timer = setTimeout(() => {
+        if (this._reject) {
+          this._reject(new Error('Worker operation timed out (5 min)'));
+          this._resolve = null;
+          this._reject  = null;
+        }
+      }, 5 * 60 * 1000);
+      // Wrap resolve/reject to clear the timer
+      const origResolve = this._resolve;
+      const origReject  = this._reject;
+      this._resolve = (v: any) => { clearTimeout(timer); origResolve?.(v); };
+      this._reject  = (e: any) => { clearTimeout(timer); origReject?.(e); };
     });
   }
 

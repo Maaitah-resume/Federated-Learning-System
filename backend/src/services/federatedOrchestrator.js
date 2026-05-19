@@ -318,12 +318,17 @@ async function startJob(participantIds, roomId) {
       );
     }
 
-    emitter.emit(WS_EVENTS.TRAINING_STARTING, { jobId, totalRounds, participants: participantIds });
-    runRounds(jobId, participantIds, totalRounds).catch(err => {
-      console.error(`[FedOrch] Job ${jobId} crashed:`, err.message);
-      activeJob = null;
-    });
-    return activeJob;
+  emitter.emit(WS_EVENTS.TRAINING_STARTING, { jobId, totalRounds, participants: participantIds });
+  runRounds(jobId, participantIds, totalRounds).catch(err => {
+    console.error(`[FedOrch] Job ${jobId} crashed:`, err.message);
+    // FIX #4: Reset participants back to QUEUED so they can rejoin
+    Participant.updateMany(
+      { jobId, status: PARTICIPANT_STATUS.TRAINING },
+      { $set: { status: PARTICIPANT_STATUS.QUEUED, jobId: null } }
+    ).catch(dbErr => console.error('[FedOrch] Participant cleanup error:', dbErr.message));
+    activeJob = null;
+  });
+  return activeJob;
   } finally {
     isStartingJob = false;
   }
@@ -382,15 +387,7 @@ async function runRounds(jobId, participantIds, totalRounds) {
         }
       }, timeoutMs);
 
-      roundResolve = () => {
-        // Called when received >= expected (all submitted)
-        clearTimeout(hardTimer);
-        if (stragglerTimer) clearTimeout(stragglerTimer);
-        resolve();
-      };
-
       // Straggler grace period: start 90s countdown after first submission
-      const originalSubmitHook = roundResolve;
       const checkStraggler = () => {
         const n = pendingSubmissions.size;
         const expected = participantIds.length;
@@ -405,15 +402,12 @@ async function runRounds(jobId, participantIds, totalRounds) {
         }
       };
 
-      // Patch submitWeights to also check straggler after each submission
-      const _origResolve = roundResolve;
       roundResolve = () => {
         clearTimeout(hardTimer);
         if (stragglerTimer) clearTimeout(stragglerTimer);
         roundResolve = null;
         resolve();
       };
-      // Export checkStraggler so submitWeights can call it
       activeJob._checkStraggler = checkStraggler;
     });
     activeJob._checkStraggler = null;

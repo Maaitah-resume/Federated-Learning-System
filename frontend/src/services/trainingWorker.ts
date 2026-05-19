@@ -339,7 +339,8 @@ function handleExtractWeights() {
     result.shapes.push(w.shape as number[]);
     result.values.push(Array.from(w.dataSync()));
   }
-  // Do NOT dispose — same DataId refcount issue as main thread
+  // FIX #6: Dispose the tensor copies returned by getWeights() to prevent memory leak
+  ws.forEach(t => t.dispose());
   self.postMessage({ type: 'WEIGHTS_READY', payload: result });
 }
 
@@ -373,6 +374,8 @@ function handleDispose() {
   model?.dispose(); xs?.dispose(); ys?.dispose();
   model = null; xs = null; ys = null;
   meta = null; prevGlobalW = null; prevUpdateNorm = 0;
+  // FIX #3: Notify main thread so pending Promises can be rejected
+  self.postMessage({ type: 'DISPOSED' });
 }
 
 // ─── Message router ───────────────────────────────────────────────────────

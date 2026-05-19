@@ -34,6 +34,7 @@ export default function Queue() {
   const pendingRoundRef       = useRef<any>(null);
   const lastSubmittedRoundRef    = useRef(0);
   const currentlyTrainingRoundRef = useRef(0);  // tracks which round is actively in model.fit()
+  const activeJobIdRef          = useRef<string|null>(null);  // FIX #1: track active job ID independently of inQueue
   const refreshRef            = useRef(refresh);
   useEffect(() => { refreshRef.current = refresh; }, [refresh]);
 
@@ -138,6 +139,8 @@ export default function Queue() {
       } catch (submitErr: any) {
         if (submitErr?.response?.status === 409) {
           console.warn(`[Queue] Submit round ${event.round} → 409 (server advanced). Skipping.`);
+          // FIX #7: Update lastSubmittedRoundRef so we don't retry this round
+          lastSubmittedRoundRef.current = event.round;
           setStatus(s=>({...s,phase:'waiting',message:`Round ${event.round} skipped — ready for next round`}));
         } else {
           throw submitErr;
@@ -206,7 +209,8 @@ export default function Queue() {
     const poll = setInterval(async () => {
       if (isPollFiringRef.current) return;  // another poll callback is already running
       if (isTrainingRef.current)   return;  // already training
-      if (!inQueueRef.current)     return;  // not in the job
+      // FIX #1: Accept if inQueue OR if we have a tracked active job ID
+      if (!inQueueRef.current && !activeJobIdRef.current) return;
 
       // If model is not ready but CSV is in sessionStorage, rebuild it
       if (!localTrainer.isReady) {
@@ -294,6 +298,10 @@ export default function Queue() {
   // ── inQueue sync ──────────────────────────────────────────────────────────
   useEffect(() => {
     inQueueRef.current = inQueue;
+    // FIX #1: When inQueue becomes true and there's an active job, sync the job ID
+    if (inQueue && queue.activeJob?.jobId) {
+      activeJobIdRef.current = queue.activeJob.jobId;
+    }
     if (inQueue && pendingRoundRef.current && !isTrainingRef.current) {
       const pending = pendingRoundRef.current;
       if (pending.round > lastSubmittedRoundRef.current) {
@@ -321,12 +329,25 @@ export default function Queue() {
   useEffect(() => {
     if (!socket) return;
 
+    const onTrainingStarting = (data:any) => {
+      // FIX #1: Set activeJobIdRef immediately when training starts, BEFORE
+      // the QueueContext poll updates inQueue. This closes the timing gap
+      // where round:started events are ignored because inQueueRef is still false.
+      activeJobIdRef.current = data.jobId;
+      console.log('[Queue] training:starting → job', data.jobId);
+    };
+
     const onRoundStarted = async (data:any) => {
       console.log('[Queue] round:started round=', data.round,
         'inQueue=', inQueueRef.current, 'isTraining=', isTrainingRef.current,
-        'modelReady=', localTrainer.isReady, 'lastSubmitted=', lastSubmittedRoundRef.current);
+        'modelReady=', localTrainer.isReady, 'lastSubmitted=', lastSubmittedRoundRef.current,
+        'activeJobId=', activeJobIdRef.current);
 
-      if (!inQueueRef.current) {
+      // FIX #1: Accept the event if we're in the queue OR if the jobId matches
+      // our tracked active job. This handles the timing gap where inQueueRef
+      // hasn't been updated by the QueueContext poll yet.
+      const isParticipant = inQueueRef.current || activeJobIdRef.current === data.jobId;
+      if (!isParticipant) {
         console.log('[Queue] Not in queue — ignoring round:started for job', data.jobId);
         return;
       }
@@ -364,23 +385,26 @@ export default function Queue() {
       pendingRoundRef.current       = null;
       isTrainingRef.current         = false;
       lastSubmittedRoundRef.current = 0;
+      activeJobIdRef.current        = null;  // FIX #1: clear tracked job ID
       sessionStorage.removeItem('fl_csv_text');
       sessionStorage.removeItem('fl_csv_name');
       localTrainer.dispose();
       refreshRef.current();
     };
 
-    socket.on('round:started',     onRoundStarted);
-    socket.on('weights:submitted', onWeightsSub);
-    socket.on('training:complete', onComplete);
-    socket.on('round:aggregated',  onRoundAggregated);
+    socket.on('training:starting',   onTrainingStarting);
+    socket.on('round:started',       onRoundStarted);
+    socket.on('weights:submitted',   onWeightsSub);
+    socket.on('training:complete',   onComplete);
+    socket.on('round:aggregated',    onRoundAggregated);
     return () => {
-      socket.off('round:started',     onRoundStarted);
-      socket.off('weights:submitted', onWeightsSub);
-      socket.off('training:complete', onComplete);
-      socket.off('round:aggregated',  onRoundAggregated);
+      socket.off('training:starting',   onTrainingStarting);
+      socket.off('round:started',       onRoundStarted);
+      socket.off('weights:submitted',   onWeightsSub);
+      socket.off('training:complete',   onComplete);
+      socket.off('round:aggregated',    onRoundAggregated);
     };
-  }, [socket]);
+  }, [socket, rebuildModelFromSession]);
 
   // ── Restore CSV on mount / cleanup on unmount ────────────────────────────
   useEffect(() => {
