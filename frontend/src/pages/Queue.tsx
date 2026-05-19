@@ -147,15 +147,32 @@ export default function Queue() {
 
       try {
         const res = await apiClient.get<{
-          hasWeights:      boolean;
-          jobId:           string;
-          currentRound:    number;
-          totalRounds:     number;
-          weights?:        any;
+          hasWeights:       boolean;
+          jobId:            string;
+          currentRound:     number;
+          totalRounds:      number;
+          weights?:         any;
           adaptiveWeights?: Record<string,number> | null;
+          alreadySubmitted: boolean;
         }>('/api/federated/weights');
 
-        const { jobId, currentRound, totalRounds, weights, adaptiveWeights } = res.data;
+        const { jobId, currentRound, totalRounds, weights, adaptiveWeights, alreadySubmitted } = res.data;
+
+        // ── Reconnect sync ──────────────────────────────────────────────────
+        // If the server says we already submitted this round (from a previous
+        // socket session), sync lastSubmittedRoundRef so the dedup guard
+        // doesn't fire again needlessly, and stay in 'waiting' phase.
+        if (alreadySubmitted && currentRound > lastSubmittedRoundRef.current) {
+          console.log(`[Queue] Poll: server confirms round ${currentRound} already submitted — syncing ref`);
+          lastSubmittedRoundRef.current = currentRound;
+          setStatus(s => ({
+            ...s,
+            phase:   'waiting',
+            round:   currentRound,
+            message: `Round ${currentRound} submitted — waiting for other nodes…`,
+          }));
+          return;
+        }
 
         if (currentRound > lastSubmittedRoundRef.current) {
           console.log(
