@@ -2,33 +2,21 @@
  * Federated.routes.js
  * backend/src/routes/Federated.routes.js
  *
- * ── FIX: alreadySubmitted flag on /weights ────────────────────────────────────
- * After a page reconnect/refresh, the client's lastSubmittedRoundRef resets to 0.
- * If the server is still on round N waiting for remaining nodes, the guard
- *   `if (data.round <= lastSubmittedRoundRef.current)` → `N <= 0` → false
- * should let the client retrain — BUT if this client already submitted for
- * round N in a previous socket session, pendingSubmissions already has their
- * entry, and a second submitWeights() call gets rejected with 409 ("Wrong round"
- * or duplicate), which Queue.tsx silently swallows.  The client then stays in
- * 'waiting' phase but the server's received count never reaches expected.
+ * Fixes applied:
  *
- * REAL BUG (confirmed in logs): amer submits round 1, reconnects, gets
- * round:started replayed with data.round=1, but lastSubmittedRoundRef=1 from
- * the successful prior submission — so the guard fires and returns early.
- * The 5-second poll also hits `currentRound(1) > lastSubmitted(1)` → false.
- * Amer is permanently stuck. Mohammad+ammar keep resubmitting (server dedupes
- * them at 2/3) but arer never reaches 3/3.
+ * 1. MEMBERSHIP CHECK on /weights — non-participants get 404 so their
+ *    5-second poll loop stays quiet and doesn't attempt to train.
  *
- * FIX: /weights now returns `alreadySubmitted: bool` — true when this specific
- * companyId already has an entry in pendingSubmissions for the current round.
- * Queue.tsx uses this flag to sync lastSubmittedRoundRef on reconnect:
- *   - alreadySubmitted=true  → set lastSubmitted = currentRound (already done,
- *                              don't retrain, wait for round:aggregated)
- *   - alreadySubmitted=false → if currentRound > lastSubmitted, trigger training
+ * 2. alreadySubmitted FLAG — /weights returns whether this specific node
+ *    already has an entry in pendingSubmissions for the current round.
+ *    Queue.tsx uses this to sync lastSubmittedRoundRef after a page refresh/
+ *    reconnect, preventing the dedup guard from permanently blocking re-entry.
  *
- * ── Prior fix: Job membership check on /weights ───────────────────────────────
- * Non-participants get 404 so their poll loop stays quiet.
- * ─────────────────────────────────────────────────────────────────────────────
+ * 3. NO-CACHE HEADERS on /weights and /masks — Express has ETag caching
+ *    enabled by default. Without these headers, the browser serves a stale
+ *    304 response where alreadySubmitted=false even after the client has
+ *    submitted, causing the polling safety net to re-trigger training,
+ *    which disposes the model mid-round and stalls the round permanently.
  */
 
 const express  = require('express');
@@ -39,19 +27,23 @@ const router = express.Router();
 
 // ─── GET /api/federated/weights ───────────────────────────────────────────────
 router.get('/weights', authenticate, (req, res) => {
+  // FIX 3: Disable ETag/304 caching — alreadySubmitted and currentRound
+  // change between requests and must always return a fresh response.
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Pragma', 'no-cache');
+
   const activeJob     = fedOrch.getActiveJob();
   const globalWeights = fedOrch.getGlobalWeights();
   const companyId     = req.company.companyId;
 
   if (!activeJob) return res.status(404).json({ error: 'No active training job' });
 
-  // ── Membership check ────────────────────────────────────────────────────────
+  // FIX 1: Membership check — only job participants may poll for weights.
   if (!activeJob.participantIds.includes(companyId)) {
     return res.status(404).json({ error: 'No active training job for this node' });
   }
 
-  // ── Has this node already submitted for the current round? ──────────────────
-  // Exposed so the client can sync lastSubmittedRoundRef after a reconnect.
+  // FIX 2: Has this node already submitted for the current round?
   const alreadySubmitted = fedOrch.hasSubmittedForRound(companyId);
 
   if (!globalWeights) {
@@ -78,6 +70,10 @@ router.get('/weights', authenticate, (req, res) => {
 
 // ─── GET /api/federated/masks ─────────────────────────────────────────────────
 router.get('/masks', authenticate, (req, res) => {
+  // FIX 3: No caching on masks either — round number changes each round.
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Pragma', 'no-cache');
+
   const companyId = req.company.companyId;
   const activeJob = fedOrch.getActiveJob();
 
