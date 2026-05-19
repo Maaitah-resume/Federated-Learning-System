@@ -62,18 +62,7 @@ export default function Queue() {
     try {
       console.log('[Queue] Rebuilding model from sessionStorage CSV:', savedName);
       const blob = new Blob([savedText], { type: 'text/csv' });
-      let schema: string[] | undefined;
-      try {
-        const cached = sessionStorage.getItem('fl_schema');
-        if (cached) schema = JSON.parse(cached);
-      } catch {}
-      if (!schema) {
-        try {
-          const r = await apiClient.get<{ schema: string[] }>('/api/federated/schema');
-          schema = r.data?.schema;
-        } catch {}
-      }
-      await localTrainer.loadCSV(new File([blob], savedName, { type: 'text/csv' }), schema);
+      await localTrainer.loadCSV(new File([blob], savedName, { type: 'text/csv' }));
       setDataReady(true);
       console.log('[Queue] Model rebuilt successfully, isReady=', localTrainer.isReady);
       return true;
@@ -119,7 +108,7 @@ export default function Queue() {
     isTrainingRef.current = true;
     currentlyTrainingRoundRef.current = event.round;
     trainingStartTimeRef.current = Date.now();
-    const EPOCHS = 2;  // 2 epochs keeps each round under ~30s on CPU-backend worker
+    const EPOCHS = 3;
     try {
       if (event.globalWeights) await localTrainer.applyGlobalWeights(event.globalWeights);
       setStatus({phase:'training',round:event.round,epoch:0,totalEpochs:EPOCHS,accuracy:null,loss:null,
@@ -444,6 +433,16 @@ export default function Queue() {
     socket.on('training:complete',   onComplete);
     socket.on('round:aggregated',    onRoundAggregated);
     socket.on('training:error',      onError);
+    socket.on('round:alreadySubmitted', (data: any) => {
+      console.log('[Queue] round:alreadySubmitted round=', data.round);
+      if (data.round > lastSubmittedRoundRef.current) {
+        lastSubmittedRoundRef.current = data.round;
+      }
+      setStatus(s => ({
+        ...s, phase: 'waiting', round: data.round,
+        message: `Round ${data.round} submitted — waiting for other nodes…`,
+      }));
+    });
     return () => {
       socket.off('training:starting',   onTrainingStarting);
       socket.off('round:started',       onRoundStarted);
@@ -459,10 +458,8 @@ export default function Queue() {
     const savedText = sessionStorage.getItem('fl_csv_text');
     const savedName = sessionStorage.getItem('fl_csv_name');
     if (savedText && savedName) {
-      // Skip restore if the worker already has a model loaded (mid-training).
-      // Re-running handleFileSelectInternal while training is active sends
-      // LOAD_CSV to the worker which disposes and rebuilds the model, causing
-      // "LayersVariable dense_DenseN/kernel is already disposed".
+      // Skip if worker already has a model (mid-training page navigation).
+      // Re-running loadCSV disposes the active model causing "already disposed".
       if (localTrainer.isReady) {
         console.log('[Queue] Worker already ready — skipping sessionStorage restore');
         setDataReady(true);
@@ -486,10 +483,9 @@ export default function Queue() {
   }, []);
 
   const handleFileSelectInternal = useCallback(async (selected:File, preloadedText?:string) => {
-    // Don't re-load the CSV if the worker is already training — this would
-    // dispose the active model mid-round and cause "already disposed" errors.
+    // Never reload the CSV while training is active — this disposes the model.
     if (isTrainingRef.current) {
-      console.warn('[Queue] handleFileSelectInternal called during training — ignored');
+      console.warn('[Queue] CSV load attempted during training — ignored');
       return;
     }
     setFile(selected); setParseError(null); setDataReady(false); setDataInfo(null);
@@ -498,23 +494,7 @@ export default function Queue() {
       const text = preloadedText ?? await selected.text();
       sessionStorage.setItem('fl_csv_text', text);
       sessionStorage.setItem('fl_csv_name', selected.name);
-
-      // Fetch the global label schema from the server so every participant
-      // builds the same model architecture (same output layer size) regardless
-      // of which local labels appear in their CSV. Falls back to local schema
-      // derivation if the server is unreachable.
-      let schema: string[] | undefined;
-      try {
-        const r = await apiClient.get<{ schema: string[] }>('/api/federated/schema');
-        schema = r.data?.schema;
-        if (schema) sessionStorage.setItem('fl_schema', JSON.stringify(schema));
-      } catch (e) {
-        const cached = sessionStorage.getItem('fl_schema');
-        if (cached) { try { schema = JSON.parse(cached); } catch {} }
-        console.warn('[Queue] Could not fetch global schema, using fallback');
-      }
-
-      const meta = await localTrainer.loadCSV(selected, schema);
+      const meta = await localTrainer.loadCSV(selected);
       // Only build the model here if there is no pending round.
       // If a pending round exists, applyGlobalWeights() inside runLocalRound
       // will call buildModel() itself — calling it twice disposes the model
