@@ -88,7 +88,7 @@ const MASK_SCALE = 0.5;
 const INF_CLAMP  = 1e9;
 const MAX_ROWS   = 2000;
 
-// ─── Worker state ─────────────────────────────────────────────────────────────
+// ─── Worker state ────────────────────────────────────────────────────────
 let model:          tf.LayersModel | null = null;
 let xs:             tf.Tensor2D   | null = null;
 let ys:             tf.Tensor1D   | null = null;
@@ -96,7 +96,7 @@ let meta:           ParsedDataset | null = null;
 let prevGlobalW:    SerializedWeights | null = null;
 let prevUpdateNorm: number = 0;
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// ─── Helpers ──────────────────────────────────────────────────────────
 function isNonNumericColumn(values: string[]): boolean {
   const sample = values.filter(v => v !== '').slice(0, 20);
   if (sample.length === 0) return true;
@@ -152,7 +152,7 @@ function computeUpdateMetrics(): { updateNorm: number; updateConsistency: number
   return { updateNorm, updateConsistency: consistency };
 }
 
-// ─── Message handlers ─────────────────────────────────────────────────────────
+// ─── Message handlers ───────────────────────────────────────────────────────
 
 async function handleLoadCSV(csvText: string, fileName: string) {
   const lines = csvText.trim().split('\n');
@@ -229,28 +229,78 @@ async function handleLoadCSV(csvText: string, fileName: string) {
 
 function handleApplyWeights(serialized: SerializedWeights) {
   if (!meta) throw new Error('Load CSV first');
+  
+  console.log('[Worker] handleApplyWeights: applying', serialized.values.length, 'weight tensors');
+  
+  // Validate shapes match
+  if (serialized.values.length === 0) {
+    throw new Error('Received empty weights array');
+  }
+  
   prevGlobalW = serialized;
-  model?.dispose();
+  
+  // Safely dispose old model
+  try {
+    model?.dispose();
+  } catch (e) {
+    console.warn('[Worker] Error disposing old model:', e);
+  }
+  
+  // Build fresh model
   model = buildModelFromMeta(meta);
-
+  
+  // Get current weights to validate count
   const currentWeights = model.getWeights();
   if (serialized.values.length !== currentWeights.length) {
-    console.warn('[Worker] Shape mismatch — using fresh weights');
+    console.warn('[Worker] Shape mismatch: received', serialized.values.length, 
+                 'tensors but model has', currentWeights.length, '— using fresh weights');
     currentWeights.forEach(t => t.dispose());
     self.postMessage({ type: 'WEIGHTS_APPLIED' });
     return;
   }
+  
+  // Apply weights with shape validation
+  try {
+    const tensors: tf.Tensor[] = [];
+    for (let i = 0; i < serialized.values.length; i++) {
+      const shape = serialized.shapes[i];
+      const values = serialized.values[i];
+      
+      if (!shape || !Array.isArray(shape) || shape.length === 0) {
+        throw new Error(`Invalid shape at index ${i}: ${JSON.stringify(shape)}`);
+      }
+      
+      // Verify shape matches flattened values length
+      const expectedLength = shape.reduce((a, b) => a * b, 1);
+      if (values.length !== expectedLength) {
+        throw new Error(`Length mismatch at tensor ${i}: expected ${expectedLength}, got ${values.length}`);
+      }
+      
+      const tensor = tf.tensor(values, shape);
+      tensors.push(tensor);
+    }
+    
+    // Set weights on the model
+    model.setWeights(tensors);
+    console.log('[Worker] ✓ Successfully applied', tensors.length, 'weight tensors to model');
+    
+    // Cleanup
+    tensors.forEach(t => t.dispose());
+  } catch (err: any) {
+    console.error('[Worker] Error applying weights:', err.message);
+    currentWeights.forEach(t => t.dispose());
+    throw err;
+  }
+  
   currentWeights.forEach(t => t.dispose());
-
-  const tensors = serialized.values.map((flat, i) => tf.tensor(flat, serialized.shapes[i]));
-  model.setWeights(tensors);
-  tensors.forEach(t => t.dispose());
   self.postMessage({ type: 'WEIGHTS_APPLIED' });
 }
 
 async function handleTrain(epochs: number, batchSize: number) {
   if (!model) throw new Error('No model');
   if (!xs || !ys) throw new Error('No data');
+
+  console.log('[Worker] Starting training:', epochs, 'epochs,', batchSize, 'batch size');
 
   const started = Date.now();
   const history = await model.fit(xs, ys, {
@@ -272,6 +322,8 @@ async function handleTrain(epochs: number, batchSize: number) {
   const accuracy = ((history.history['acc'] ?? history.history['accuracy'] ?? [0]).at(-1)) as number;
   const loss     = ((history.history['loss'] ?? [0]).at(-1)) as number;
   const { updateNorm, updateConsistency } = computeUpdateMetrics();
+
+  console.log('[Worker] Training complete:', 'accuracy=', accuracy, 'loss=', loss);
 
   self.postMessage({
     type: 'TRAIN_COMPLETE',
@@ -323,7 +375,7 @@ function handleDispose() {
   meta = null; prevGlobalW = null; prevUpdateNorm = 0;
 }
 
-// ─── Message router ───────────────────────────────────────────────────────────
+// ─── Message router ───────────────────────────────────────────────────────
 self.onmessage = async (e: MessageEvent) => {
   const { type, payload } = e.data;
   try {
@@ -338,6 +390,7 @@ self.onmessage = async (e: MessageEvent) => {
       default: console.warn('[Worker] Unknown message type:', type);
     }
   } catch (err: any) {
+    console.error('[Worker] Error handling', type, ':', err.message);
     self.postMessage({ type: 'ERROR', payload: { message: err.message } });
   }
 };
