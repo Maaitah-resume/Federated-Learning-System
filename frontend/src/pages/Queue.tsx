@@ -459,9 +459,18 @@ export default function Queue() {
     const savedText = sessionStorage.getItem('fl_csv_text');
     const savedName = sessionStorage.getItem('fl_csv_name');
     if (savedText && savedName) {
-      console.log('[Queue] Restoring CSV from sessionStorage:', savedName);
-      const blob = new Blob([savedText], {type:'text/csv'});
-      handleFileSelectInternal(new File([blob], savedName, {type:'text/csv'}), savedText);
+      // Skip restore if the worker already has a model loaded (mid-training).
+      // Re-running handleFileSelectInternal while training is active sends
+      // LOAD_CSV to the worker which disposes and rebuilds the model, causing
+      // "LayersVariable dense_DenseN/kernel is already disposed".
+      if (localTrainer.isReady) {
+        console.log('[Queue] Worker already ready — skipping sessionStorage restore');
+        setDataReady(true);
+      } else {
+        console.log('[Queue] Restoring CSV from sessionStorage:', savedName);
+        const blob = new Blob([savedText], {type:'text/csv'});
+        handleFileSelectInternal(new File([blob], savedName, {type:'text/csv'}), savedText);
+      }
     }
 
     // Cleanup: only dispose the trainer if the user is NOT actively in a job.
@@ -477,6 +486,12 @@ export default function Queue() {
   }, []);
 
   const handleFileSelectInternal = useCallback(async (selected:File, preloadedText?:string) => {
+    // Don't re-load the CSV if the worker is already training — this would
+    // dispose the active model mid-round and cause "already disposed" errors.
+    if (isTrainingRef.current) {
+      console.warn('[Queue] handleFileSelectInternal called during training — ignored');
+      return;
+    }
     setFile(selected); setParseError(null); setDataReady(false); setDataInfo(null);
     setStatus(s=>({...s,phase:'loading',message:'Parsing CSV in browser…'}));
     try {
