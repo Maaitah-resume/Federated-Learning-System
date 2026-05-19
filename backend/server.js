@@ -7,7 +7,7 @@
 // ── FIX: Railway WebSocket keepalive ─────────────────────────────────────────
 // Railway's load balancer has a ~60-second idle TCP timeout that is independent
 // of Socket.IO's own ping mechanism.  During a long training round (model.fit
-// on 5000 rows takes 30-90 s) no application-level messages are exchanged, so
+// on 5000 rows taks 30-90 s) no application-level messages are exchanged, so
 // Railway sees an idle connection and silently closes it.  Socket.IO's client
 // auto-reconnects, but the new socket session loses any in-flight training
 // state (lastSubmittedRoundRef resets to 0, pendingRoundRef may get cleared).
