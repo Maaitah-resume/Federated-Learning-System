@@ -119,7 +119,7 @@ export default function Queue() {
     isTrainingRef.current = true;
     currentlyTrainingRoundRef.current = event.round;
     trainingStartTimeRef.current = Date.now();
-    const EPOCHS = 3;
+    const EPOCHS = 2;  // 2 epochs keeps each round under ~30s on CPU-backend worker
     try {
       if (event.globalWeights) await localTrainer.applyGlobalWeights(event.globalWeights);
       setStatus({phase:'training',round:event.round,epoch:0,totalEpochs:EPOCHS,accuracy:null,loss:null,
