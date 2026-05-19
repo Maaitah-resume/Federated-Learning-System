@@ -32,7 +32,8 @@ export default function Queue() {
   const inQueueRef            = useRef(false);
   const isTrainingRef         = useRef(false);
   const pendingRoundRef       = useRef<any>(null);
-  const lastSubmittedRoundRef = useRef(0);
+  const lastSubmittedRoundRef    = useRef(0);
+  const currentlyTrainingRoundRef = useRef(0);  // tracks which round is actively in model.fit()
   const refreshRef            = useRef(refresh);
   useEffect(() => { refreshRef.current = refresh; }, [refresh]);
 
@@ -55,7 +56,13 @@ export default function Queue() {
       return;
     }
     if (isTrainingRef.current) {
-      console.log('[Queue] Round', event.round, 'queued (training in progress)');
+      // If we're already training THIS round, the replay is redundant — ignore it.
+      // Only queue if it's a FUTURE round we haven't started yet.
+      if (event.round === currentlyTrainingRoundRef.current) {
+        console.log('[Queue] Already training round', event.round, '— ignoring replay');
+        return;
+      }
+      console.log('[Queue] Round', event.round, 'queued (training round', currentlyTrainingRoundRef.current, 'in progress)');
       pendingRoundRef.current = event;
       return;
     }
@@ -67,6 +74,8 @@ export default function Queue() {
     }
 
     isTrainingRef.current = true;
+    currentlyTrainingRoundRef.current = event.round;
+    trainingStartTimeRef.current = Date.now();
     const EPOCHS = 3;
     try {
       if (event.globalWeights) localTrainer.applyGlobalWeights(event.globalWeights);
@@ -114,6 +123,7 @@ export default function Queue() {
       // The 5-second polling safety net already retries correctly.
     } finally {
       isTrainingRef.current = false;
+      currentlyTrainingRoundRef.current = 0;
       if (pendingRoundRef.current && inQueueRef.current) {
         const next = pendingRoundRef.current;
         pendingRoundRef.current = null;
@@ -129,6 +139,25 @@ export default function Queue() {
 
   const runLocalRoundRef = useRef(runLocalRound);
   useEffect(() => { runLocalRoundRef.current = runLocalRound; }, [runLocalRound]);
+
+  // ── Training watchdog ─────────────────────────────────────────────────────
+  // If isTrainingRef is stuck true for >3 minutes something silently crashed.
+  // Force-reset so the polling safety net can retrigger training.
+  const trainingStartTimeRef = useRef<number>(0);
+  useEffect(() => {
+    const watchdog = setInterval(() => {
+      if (isTrainingRef.current) {
+        const elapsed = Date.now() - trainingStartTimeRef.current;
+        if (elapsed > 3 * 60 * 1000) {
+          console.warn('[Queue] Watchdog: isTrainingRef stuck >3min — force resetting');
+          isTrainingRef.current = false;
+          currentlyTrainingRoundRef.current = 0;
+          setStatus(s => ({ ...s, phase: 'idle', message: 'Training timed out — retrying…' }));
+        }
+      }
+    }, 15000);
+    return () => clearInterval(watchdog);
+  }, []);
 
   // ── POLLING SAFETY NET ────────────────────────────────────────────────────
   // Every 5 s: detect if we are behind on rounds and trigger training via HTTP.
