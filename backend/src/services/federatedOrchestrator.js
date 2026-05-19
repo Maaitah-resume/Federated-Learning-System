@@ -489,4 +489,8 @@ async function runRounds(jobId, participantIds, totalRounds) {
   activeJob = null; globalWeights = null; metaAggregator = null; roundSeeds.clear();
 }
 
-module.exports = { startJob, getActiveJob, getGlobalWeights, getMasksForNode, submitWeights };
+function hasSubmittedForRound(companyId) {
+  return pendingSubmissions.has(companyId);
+}
+
+module.exports = { startJob, getActiveJob, getGlobalWeights, getMasksForNode, submitWeights, hasSubmittedForRound };
