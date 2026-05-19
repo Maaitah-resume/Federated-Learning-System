@@ -113,6 +113,11 @@ function setupWebSocket(io) {
     io.emit(WS_EVENTS.TRAINING_COMPLETE, data);
   });
 
+  emitter.on(WS_EVENTS.TRAINING_ERROR, (data) => {
+    console.log('[WS] training:error →', data.jobId, data.message);
+    io.emit(WS_EVENTS.TRAINING_ERROR, data);
+  });
+
   emitter.on(WS_EVENTS.QUEUE_UPDATED, (data) => {
     io.emit(WS_EVENTS.QUEUE_UPDATED, data);
   });

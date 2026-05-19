@@ -321,7 +321,7 @@ async function startJob(participantIds, roomId) {
   emitter.emit(WS_EVENTS.TRAINING_STARTING, { jobId, totalRounds, participants: participantIds });
   runRounds(jobId, participantIds, totalRounds).catch(err => {
     console.error(`[FedOrch] Job ${jobId} crashed:`, err.message);
-    // FIX #4: Reset participants back to QUEUED so they can rejoin
+    emitter.emit(WS_EVENTS.TRAINING_ERROR, { jobId, code: 'JOB_CRASHED', message: err.message });
     Participant.updateMany(
       { jobId, status: PARTICIPANT_STATUS.TRAINING },
       { $set: { status: PARTICIPANT_STATUS.QUEUED, jobId: null } }
@@ -416,6 +416,20 @@ async function runRounds(jobId, participantIds, totalRounds) {
 
     // ── Aggregate (paper Section 3.4) ─────────────────────────────────────────
     const submissions = [...pendingSubmissions.values()];
+
+    // Guard: if zero submissions after timeout, skip this round and continue
+    if (submissions.length === 0) {
+      console.error(`[FedOrch] Round ${round} has ZERO submissions — skipping round`);
+      await TrainingMetric.create({ jobId, round, companyId: 'global', type: 'global', accuracy: 0, loss: 0 });
+      emitter.emit('round:aggregated', {
+        jobId, round, totalRounds, globalAccuracy: 0, globalLoss: 0,
+        nodesSubmitted: 0,
+        adaptiveWeights: alphaThisRound,
+        nextRoundWeights: adaptiveWeightsNext,
+      });
+      continue;
+    }
+
     const template    = submissions[0].maskedWeights;
 
     globalWeights = {

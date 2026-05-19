@@ -35,6 +35,7 @@ export default function Queue() {
   const lastSubmittedRoundRef    = useRef(0);
   const currentlyTrainingRoundRef = useRef(0);  // tracks which round is actively in model.fit()
   const activeJobIdRef          = useRef<string|null>(null);  // FIX #1: track active job ID independently of inQueue
+  const consecutive404Ref       = useRef(0);    // counts consecutive 404s to detect dead job
   const refreshRef            = useRef(refresh);
   useEffect(() => { refreshRef.current = refresh; }, [refresh]);
 
@@ -239,6 +240,9 @@ export default function Queue() {
 
         const { jobId, currentRound, totalRounds, weights, adaptiveWeights, alreadySubmitted } = res.data;
 
+        // Successful response — reset 404 counter
+        consecutive404Ref.current = 0;
+
         // ── Reconnect sync ──────────────────────────────────────────────────
         // If the server confirms we already submitted this round (from a
         // previous socket session before a page refresh), sync
@@ -270,8 +274,23 @@ export default function Queue() {
           });
         }
       } catch (e: any) {
-        // 404 = no active job (between rounds or job done) — expected, ignore
-        if (e?.response?.status !== 404) {
+        if (e?.response?.status === 404) {
+          // 404 = no active job — count consecutive occurrences
+          consecutive404Ref.current++;
+          // After 6 consecutive 404s (~30s), assume job ended/crashed and reset state
+          if (consecutive404Ref.current >= 6) {
+            console.log('[Queue] Poll: 6 consecutive 404s — resetting state');
+            consecutive404Ref.current = 0;
+            isTrainingRef.current = false;
+            currentlyTrainingRoundRef.current = 0;
+            pendingRoundRef.current = null;
+            activeJobIdRef.current = null;
+            // Don't reset lastSubmittedRoundRef — if job restarted, we want to sync
+            setStatus({ phase: 'idle', round: 0, epoch: 0, totalEpochs: 3, accuracy: null, loss: null, message: '' });
+          }
+        } else {
+          // Non-404 error — reset 404 counter but log
+          consecutive404Ref.current = 0;
           console.debug('[Queue] Poll error:', e?.message);
         }
       } finally {
@@ -381,15 +400,30 @@ export default function Queue() {
       setSubmissions(null);
     };
     const onComplete = () => {
-      setStatus({phase:'done',round:0,epoch:0,totalEpochs:3,accuracy:null,loss:null,message:'🎉 Training complete!'});
+      setStatus({phase:'done',round:0,epoch:0,totalEpochs:3,accuracy:null,loss:null,message:'Training complete!'});
       pendingRoundRef.current       = null;
       isTrainingRef.current         = false;
       lastSubmittedRoundRef.current = 0;
       activeJobIdRef.current        = null;  // FIX #1: clear tracked job ID
+      consecutive404Ref.current     = 0;
       sessionStorage.removeItem('fl_csv_text');
       sessionStorage.removeItem('fl_csv_name');
       localTrainer.dispose();
       refreshRef.current();
+    };
+
+    const onError = (data: any) => {
+      console.error('[Queue] training:error:', data.message);
+      setStatus({
+        phase: 'idle', round: 0, epoch: 0, totalEpochs: 3,
+        accuracy: null, loss: null,
+        message: `Training error: ${data.message}`,
+      });
+      pendingRoundRef.current = null;
+      isTrainingRef.current = false;
+      currentlyTrainingRoundRef.current = 0;
+      activeJobIdRef.current = null;
+      consecutive404Ref.current = 0;
     };
 
     socket.on('training:starting',   onTrainingStarting);
@@ -397,12 +431,14 @@ export default function Queue() {
     socket.on('weights:submitted',   onWeightsSub);
     socket.on('training:complete',   onComplete);
     socket.on('round:aggregated',    onRoundAggregated);
+    socket.on('training:error',      onError);
     return () => {
       socket.off('training:starting',   onTrainingStarting);
       socket.off('round:started',       onRoundStarted);
       socket.off('weights:submitted',   onWeightsSub);
       socket.off('training:complete',   onComplete);
       socket.off('round:aggregated',    onRoundAggregated);
+      socket.off('training:error',      onError);
     };
   }, [socket, rebuildModelFromSession]);
 

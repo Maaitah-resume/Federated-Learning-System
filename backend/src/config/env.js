@@ -11,10 +11,14 @@ const env = {
 const MIN_CLIENTS           = parseInt(process.env.MIN_CLIENTS           || '3',  10);
 const DEFAULT_ROUNDS        = parseInt(process.env.DEFAULT_ROUNDS        || '10', 10);
 const ROUND_TIMEOUT_MINUTES = parseInt(process.env.ROUND_TIMEOUT_MINUTES || '5',  10);
+const PYTHON_FL_URL         = process.env.PYTHON_FL_URL                  || 'http://localhost:8000';
+const PYTHON_TIMEOUT        = parseInt(process.env.PYTHON_TIMEOUT        || '60000', 10);
 
 module.exports = {
   env,
   MIN_CLIENTS,
   DEFAULT_ROUNDS,
   ROUND_TIMEOUT_MINUTES,
+  PYTHON_FL_URL,
+  PYTHON_TIMEOUT,
 };

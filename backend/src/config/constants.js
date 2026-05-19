@@ -10,7 +10,9 @@ const WS_EVENTS = {
   TRAINING_STARTING:  'training:starting',
   ROUND_STARTED:      'round:started',
   WEIGHTS_SUBMITTED:  'weights:submitted',
+  ROUND_AGGREGATED:   'round:aggregated',
   TRAINING_COMPLETE:  'training:complete',
+  TRAINING_ERROR:     'training:error',
 };
 
 const JOB_STATUS = {
@@ -27,4 +29,11 @@ const ROLES = {
   CLIENT: 'client',
 };
 
-module.exports = { PARTICIPANT_STATUS, WS_EVENTS, JOB_STATUS, ROLES };
+const ROUND_STATUS = {
+  IN_PROGRESS: 'IN_PROGRESS',
+  AGGREGATING: 'AGGREGATING',
+  COMPLETE:    'COMPLETE',
+  FAILED:      'FAILED',
+};
+
+module.exports = { PARTICIPANT_STATUS, WS_EVENTS, JOB_STATUS, ROLES, ROUND_STATUS };
