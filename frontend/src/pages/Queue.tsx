@@ -159,9 +159,10 @@ export default function Queue() {
         const { jobId, currentRound, totalRounds, weights, adaptiveWeights, alreadySubmitted } = res.data;
 
         // ── Reconnect sync ──────────────────────────────────────────────────
-        // If the server says we already submitted this round (from a previous
-        // socket session), sync lastSubmittedRoundRef so the dedup guard
-        // doesn't fire again needlessly, and stay in 'waiting' phase.
+        // If the server confirms we already submitted this round (from a
+        // previous socket session before a page refresh), sync
+        // lastSubmittedRoundRef so the dedup guard doesn't block us, and
+        // stay in 'waiting' phase rather than re-triggering training.
         if (alreadySubmitted && currentRound > lastSubmittedRoundRef.current) {
           console.log(`[Queue] Poll: server confirms round ${currentRound} already submitted — syncing ref`);
           lastSubmittedRoundRef.current = currentRound;
@@ -284,7 +285,7 @@ export default function Queue() {
     };
   }, [socket]);
 
-  // ── Restore CSV on mount ──────────────────────────────────────────────────
+  // ── Restore CSV on mount / cleanup on unmount ────────────────────────────
   useEffect(() => {
     const savedText = sessionStorage.getItem('fl_csv_text');
     const savedName = sessionStorage.getItem('fl_csv_name');
@@ -293,6 +294,17 @@ export default function Queue() {
       const blob = new Blob([savedText], {type:'text/csv'});
       handleFileSelectInternal(new File([blob], savedName, {type:'text/csv'}), savedText);
     }
+
+    // Cleanup: only dispose the trainer if the user is NOT actively in a job.
+    // Navigating away mid-training should not kill the model — the CSV is
+    // preserved in sessionStorage and rebuilt on re-entry. Disposing here
+    // when training is active would cause "Container already disposed" because
+    // the socket replay fires applyGlobalWeights on a dead model.
+    return () => {
+      if (!isTrainingRef.current && !inQueueRef.current) {
+        localTrainer.dispose();
+      }
+    };
   }, []);
 
   const handleFileSelectInternal = useCallback(async (selected:File, preloadedText?:string) => {
@@ -303,16 +315,22 @@ export default function Queue() {
       sessionStorage.setItem('fl_csv_text', text);
       sessionStorage.setItem('fl_csv_name', selected.name);
       const meta = await localTrainer.loadCSV(selected);
-      localTrainer.buildModel();
+      // Only build the model here if there is no pending round.
+      // If a pending round exists, applyGlobalWeights() inside runLocalRound
+      // will call buildModel() itself — calling it twice disposes the model
+      // that was just built and causes "Container is already disposed".
+      const hasPending = !!(pendingRoundRef.current && inQueueRef.current && !isTrainingRef.current
+        && pendingRoundRef.current.round > lastSubmittedRoundRef.current);
+      if (!hasPending) {
+        localTrainer.buildModel();
+      }
       setDataReady(true);
       setDataInfo({rows:meta.rows,features:meta.features,classes:meta.classes});
       setStatus(s=>({...s,phase:'idle',message:''}));
-      if (pendingRoundRef.current && inQueueRef.current && !isTrainingRef.current) {
-        const pending = pendingRoundRef.current;
-        if (pending.round > lastSubmittedRoundRef.current) {
-          pendingRoundRef.current = null;
-          setTimeout(() => runLocalRoundRef.current(pending), 0);
-        } else { pendingRoundRef.current = null; }
+      if (hasPending) {
+        const pending = pendingRoundRef.current!;
+        pendingRoundRef.current = null;
+        setTimeout(() => runLocalRoundRef.current(pending), 0);
       }
     } catch (err:any) {
       setParseError(err.message||'Failed to parse CSV');
