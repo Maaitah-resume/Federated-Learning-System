@@ -1,88 +1,38 @@
 // backend/src/websocket/socketHandler.js
-//
-// ── FIX: Scoped round:started replay ─────────────────────────────────────────
-// Previously every newly connected WebSocket client received a replay of the
-// current round:started event regardless of job membership.  Ammar connecting
-// while Mohammad+Amer were on round 4 received that replay, set
-// pendingRoundRef, and showed "Round 4 is waiting!" — even though Ammar was
-// never in that job.
-//
-// Fix: decode companyId from the socket handshake auth token
-// (format: "demo-token-<companyId>") and only replay the event if that
-// companyId is in activeJob.participantIds.
-//
-// The frontend SocketContext.tsx now passes the token in socket auth:
-//   io(url, { auth: { token: 'demo-token-<id>' } })
-// so socket.handshake.auth.token is always available here.
-// ─────────────────────────────────────────────────────────────────────────────
-
 const emitter = require('./eventEmitter');
 const { WS_EVENTS } = require('../config/constants');
 
-/** Extract companyId from the demo-token in the socket handshake */
-function getCompanyIdFromSocket(socket) {
-  try {
-    const token =
-      socket.handshake.auth?.token ||
-      (socket.handshake.headers?.authorization || '').replace('Bearer ', '');
-
-    if (token && token.startsWith('demo-token-')) {
-      return token.replace('demo-token-', '').trim() || null;
-    }
-  } catch (_) { /* ignore */ }
-  return null;
-}
-
 function setupWebSocket(io) {
   io.on('connection', (socket) => {
-    const companyId = getCompanyIdFromSocket(socket);
-    console.log(`Client connected: ${socket.id} (${companyId || 'unknown'})`);
+    console.log('Client connected:', socket.id);
 
-    // ── Replay current round ONLY to participants ─────────────────────────────
+    // ── Replay current round to clients that connect / reconnect late ─────────
+    // If round:started was already emitted before this client connected they
+    // would miss it entirely and never submit weights.
+    // We immediately send the active round state to every new connection.
+    //
+    // NOTE: the client-side lastSubmittedRoundRef guard ensures that a client
+    // which already submitted this round will IGNORE the replay rather than
+    // re-training and causing a 409.  Do NOT add server-side per-socket
+    // tracking here — the client-side guard is the right layer.
     try {
       const fedOrch       = require('../services/federatedOrchestrator');
       const activeJob     = fedOrch.getActiveJob();
       const globalWeights = fedOrch.getGlobalWeights();
 
       if (activeJob && activeJob.status === 'TRAINING') {
-        const isParticipant = companyId && activeJob.participantIds.includes(companyId);
-
-        if (isParticipant) {
-          // KEY FIX: don't replay if the client already submitted for this round.
-          // Replaying to a client that's mid-training causes runLocalRound to fire
-          // again, which calls applyGlobalWeights → disposes the active model →
-          // "LayersVariable already disposed" → training never completes.
-          const alreadySubmitted = fedOrch.hasSubmittedForRound(companyId);
-          if (alreadySubmitted) {
-            console.log(
-              `[WS] Skipping replay for ${companyId} — already submitted round ${activeJob.currentRound}`
-            );
-            // Send a lightweight sync event instead so the client can update
-            // its UI to "waiting" state without re-triggering training.
-            socket.emit('round:alreadySubmitted', {
-              jobId:        activeJob.jobId,
-              round:        activeJob.currentRound,
-              totalRounds:  activeJob.totalRounds,
-            });
-          } else {
-            console.log(
-              `[WS] Replaying round ${activeJob.currentRound} to participant ${companyId} (${socket.id})`
-            );
-            socket.emit(WS_EVENTS.ROUND_STARTED, {
-              jobId:           activeJob.jobId,
-              round:           activeJob.currentRound,
-              totalRounds:     activeJob.totalRounds,
-              globalWeights,
-              adaptiveWeights: activeJob.adaptiveWeights || null,
-            });
-          }
-        } else {
-          // Non-participant connecting during a job — intentionally no replay.
-          // They will see their own idle waiting room.
-          console.log(
-            `[WS] ${socket.id} (${companyId || 'unknown'}) is NOT in job ${activeJob.jobId} — skipping replay`
-          );
-        }
+        console.log(`[WS] Replaying round ${activeJob.currentRound} to late-joining client ${socket.id}`);
+        socket.emit(WS_EVENTS.ROUND_STARTED, {
+          jobId:           activeJob.jobId,
+          round:           activeJob.currentRound,
+          totalRounds:     activeJob.totalRounds,
+          globalWeights,
+          // FIX: include adaptive weights so reconnecting clients scale by
+          // the correct α instead of falling back to uniform (1/N).
+          // activeJob.adaptiveWeights is set by federatedOrchestrator.js
+          // at the start of each round before emitting ROUND_STARTED.
+          adaptiveWeights: activeJob.adaptiveWeights || null,
+        });
       }
     } catch (err) {
       console.warn('[WS] Could not replay round state:', err.message);
@@ -99,13 +49,12 @@ function setupWebSocket(io) {
     });
 
     socket.on('disconnect', () => {
-      console.log(`Client disconnected: ${socket.id} (${companyId || 'unknown'})`);
+      console.log('Client disconnected:', socket.id);
     });
   });
 
   // ── Federated learning events → broadcast to ALL clients ──────────────────
-  // Broadcasts are fine because Queue.tsx guards every handler with
-  // inQueueRef.current — a user not in the job silently ignores them.
+
   emitter.on(WS_EVENTS.TRAINING_STARTING, (data) => {
     console.log('[WS] training:starting →', data.jobId);
     io.emit(WS_EVENTS.TRAINING_STARTING, data);
@@ -131,26 +80,15 @@ function setupWebSocket(io) {
     io.emit(WS_EVENTS.TRAINING_COMPLETE, data);
   });
 
-  emitter.on(WS_EVENTS.TRAINING_ERROR, (data) => {
-    console.log('[WS] training:error →', data.jobId, data.message);
-    io.emit(WS_EVENTS.TRAINING_ERROR, data);
-  });
-
   emitter.on(WS_EVENTS.QUEUE_UPDATED, (data) => {
     io.emit(WS_EVENTS.QUEUE_UPDATED, data);
   });
 
-  // ── Admin config broadcast ─────────────────────────────────────────────────
-  emitter.on('config:updated', (data) => {
-    console.log('[WS] config:updated → MIN_CLIENTS=' + data.config?.MIN_CLIENTS);
-    io.emit('config:updated', data);
-  });
-
   // ── Legacy session-scoped events ───────────────────────────────────────────
-  emitter.on('training-update',      (data) => { io.to(`session-${data.sessionId}`).emit('training-update', data); });
-  emitter.on('queue-update',         (data) => { io.emit('queue-update', data); });
-  emitter.on('client-update',        (data) => { io.to(`session-${data.sessionId}`).emit('client-update', data); });
-  emitter.on('aggregation-complete', (data) => { io.to(`session-${data.sessionId}`).emit('aggregation-complete', data); });
+  emitter.on('training-update',     (data) => { io.to(`session-${data.sessionId}`).emit('training-update', data); });
+  emitter.on('queue-update',        (data) => { io.emit('queue-update', data); });
+  emitter.on('client-update',       (data) => { io.to(`session-${data.sessionId}`).emit('client-update', data); });
+  emitter.on('aggregation-complete',(data) => { io.to(`session-${data.sessionId}`).emit('aggregation-complete', data); });
 }
 
 module.exports = setupWebSocket;
