@@ -251,7 +251,12 @@ function submitWeights(companyId, { maskedWeights, metrics, round, jobId }) {
   console.log(`[FedOrch] Masked weights from ${companyId} — ${received}/${expected} (round ${round})`);
   emitter.emit(WS_EVENTS.WEIGHTS_SUBMITTED, { jobId, round, companyId, received, expected });
 
-  if (received >= expected && roundResolve) { roundResolve(); roundResolve = null; }
+  if (received >= expected && roundResolve) {
+    roundResolve(); roundResolve = null;
+  } else if (received > 0 && activeJob._checkStraggler) {
+    // Trigger straggler grace period countdown after first submission
+    activeJob._checkStraggler();
+  }
   return { accepted: true, received, expected };
 }
 
@@ -336,15 +341,69 @@ async function runRounds(jobId, participantIds, totalRounds) {
       adaptiveWeights: alphaThisRound,
     });
 
-    // ── Wait for all submissions ────────────────────────────────────────────────
+    // ── Wait for submissions — progressive straggler timeout ──────────────────
+    // Phase 1: wait up to timeoutMs for ALL nodes to submit (roundResolve fires
+    //          immediately when the last submission arrives).
+    // Phase 2: if the hard timeout fires but at least one node submitted,
+    //          proceed with partial results rather than blocking forever.
+    //          This handles the case where one client's model.fit() hangs,
+    //          crashes silently, or is killed by the browser — common with
+    //          large global weight tensors on slower devices.
+    // Phase 3: if ZERO submissions after timeoutMs, reject (job is broken).
+    //
+    // Additionally: once the FIRST submission arrives we start a 90-second
+    // "straggler grace period". If remaining nodes don't submit within 90s of
+    // the first submission, we proceed without them. This prevents one slow
+    // device from blocking the entire federation indefinitely.
     await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
+      let stragglerTimer = null;
+
+      const hardTimer = setTimeout(() => {
+        if (stragglerTimer) clearTimeout(stragglerTimer);
         const n = pendingSubmissions.size;
-        if (n > 0) resolve();
-        else reject(new Error(`Round ${round} timed out with zero submissions`));
+        if (n > 0) {
+          console.warn(`[FedOrch] Round ${round} hard timeout — proceeding with ${n}/${participantIds.length} submissions`);
+          resolve();
+        } else {
+          reject(new Error(`Round ${round} timed out with zero submissions`));
+        }
       }, timeoutMs);
-      roundResolve = () => { clearTimeout(timer); resolve(); };
+
+      roundResolve = () => {
+        // Called when received >= expected (all submitted)
+        clearTimeout(hardTimer);
+        if (stragglerTimer) clearTimeout(stragglerTimer);
+        resolve();
+      };
+
+      // Straggler grace period: start 90s countdown after first submission
+      const originalSubmitHook = roundResolve;
+      const checkStraggler = () => {
+        const n = pendingSubmissions.size;
+        const expected = participantIds.length;
+        if (n > 0 && n < expected && !stragglerTimer) {
+          console.log(`[FedOrch] Round ${round}: first submission received — starting 90s straggler grace period`);
+          stragglerTimer = setTimeout(() => {
+            clearTimeout(hardTimer);
+            console.warn(`[FedOrch] Round ${round} straggler timeout — proceeding with ${pendingSubmissions.size}/${expected} submissions`);
+            roundResolve = null;
+            resolve();
+          }, 90000);
+        }
+      };
+
+      // Patch submitWeights to also check straggler after each submission
+      const _origResolve = roundResolve;
+      roundResolve = () => {
+        clearTimeout(hardTimer);
+        if (stragglerTimer) clearTimeout(stragglerTimer);
+        roundResolve = null;
+        resolve();
+      };
+      // Export checkStraggler so submitWeights can call it
+      activeJob._checkStraggler = checkStraggler;
     });
+    activeJob._checkStraggler = null;
 
     activeJob.status = 'AGGREGATING';
 
@@ -430,9 +489,4 @@ async function runRounds(jobId, participantIds, totalRounds) {
   activeJob = null; globalWeights = null; metaAggregator = null; roundSeeds.clear();
 }
 
-
-function hasSubmittedForRound(companyId) {
-  return pendingSubmissions.has(companyId);
-}
-
-module.exports = { startJob, getActiveJob, getGlobalWeights, getMasksForNode, submitWeights, hasSubmittedForRound };
+module.exports = { startJob, getActiveJob, getGlobalWeights, getMasksForNode, submitWeights };
