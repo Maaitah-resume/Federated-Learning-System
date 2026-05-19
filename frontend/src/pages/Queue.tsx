@@ -62,7 +62,18 @@ export default function Queue() {
     try {
       console.log('[Queue] Rebuilding model from sessionStorage CSV:', savedName);
       const blob = new Blob([savedText], { type: 'text/csv' });
-      await localTrainer.loadCSV(new File([blob], savedName, { type: 'text/csv' }));
+      let schema: string[] | undefined;
+      try {
+        const cached = sessionStorage.getItem('fl_schema');
+        if (cached) schema = JSON.parse(cached);
+      } catch {}
+      if (!schema) {
+        try {
+          const r = await apiClient.get<{ schema: string[] }>('/api/federated/schema');
+          schema = r.data?.schema;
+        } catch {}
+      }
+      await localTrainer.loadCSV(new File([blob], savedName, { type: 'text/csv' }), schema);
       setDataReady(true);
       console.log('[Queue] Model rebuilt successfully, isReady=', localTrainer.isReady);
       return true;
@@ -472,7 +483,23 @@ export default function Queue() {
       const text = preloadedText ?? await selected.text();
       sessionStorage.setItem('fl_csv_text', text);
       sessionStorage.setItem('fl_csv_name', selected.name);
-      const meta = await localTrainer.loadCSV(selected);
+
+      // Fetch the global label schema from the server so every participant
+      // builds the same model architecture (same output layer size) regardless
+      // of which local labels appear in their CSV. Falls back to local schema
+      // derivation if the server is unreachable.
+      let schema: string[] | undefined;
+      try {
+        const r = await apiClient.get<{ schema: string[] }>('/api/federated/schema');
+        schema = r.data?.schema;
+        if (schema) sessionStorage.setItem('fl_schema', JSON.stringify(schema));
+      } catch (e) {
+        const cached = sessionStorage.getItem('fl_schema');
+        if (cached) { try { schema = JSON.parse(cached); } catch {} }
+        console.warn('[Queue] Could not fetch global schema, using fallback');
+      }
+
+      const meta = await localTrainer.loadCSV(selected, schema);
       // Only build the model here if there is no pending round.
       // If a pending round exists, applyGlobalWeights() inside runLocalRound
       // will call buildModel() itself — calling it twice disposes the model
