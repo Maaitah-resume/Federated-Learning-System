@@ -159,6 +159,10 @@ export default function Queue() {
     return () => clearInterval(watchdog);
   }, []);
 
+  // Prevents simultaneous poll callbacks (from a frozen/thawed event loop)
+  // from all firing runLocalRound at the same time
+  const isPollFiringRef = useRef(false);
+
   // ── POLLING SAFETY NET ────────────────────────────────────────────────────
   // Every 5 s: detect if we are behind on rounds and trigger training via HTTP.
   // This is completely independent of the socket event chain, so it catches
@@ -170,9 +174,11 @@ export default function Queue() {
   //  - No infinite loops: poll checks isTrainingRef before acting
   useEffect(() => {
     const poll = setInterval(async () => {
-      if (isTrainingRef.current)  return;  // already training
-      if (!inQueueRef.current)    return;  // not in the job
-      if (!localTrainer.isReady)  return;  // CSV/model not loaded
+      if (isPollFiringRef.current) return;  // another poll callback is already running
+      if (isTrainingRef.current)   return;  // already training
+      if (!inQueueRef.current)     return;  // not in the job
+      if (!localTrainer.isReady)   return;  // CSV/model not loaded
+      isPollFiringRef.current = true;
 
       try {
         const res = await apiClient.get<{
@@ -222,6 +228,8 @@ export default function Queue() {
         if (e?.response?.status !== 404) {
           console.debug('[Queue] Poll error:', e?.message);
         }
+      } finally {
+        isPollFiringRef.current = false;
       }
     }, 5000);
 
