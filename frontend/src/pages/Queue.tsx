@@ -78,7 +78,7 @@ export default function Queue() {
     trainingStartTimeRef.current = Date.now();
     const EPOCHS = 3;
     try {
-      if (event.globalWeights) localTrainer.applyGlobalWeights(event.globalWeights);
+      if (event.globalWeights) await localTrainer.applyGlobalWeights(event.globalWeights);
       setStatus({phase:'training',round:event.round,epoch:0,totalEpochs:EPOCHS,accuracy:null,loss:null,
         message:`Round ${event.round}/${event.totalRounds} — training locally…`});
 
@@ -87,16 +87,16 @@ export default function Queue() {
           message:`Epoch ${epoch+1}/${EPOCHS} — acc: ${((logs?.acc||0)*100).toFixed(1)}%`}));
       });
 
-      const rawWeights = localTrainer.extractWeights();
+      const rawWeights = await localTrainer.extractWeights();
       setStatus(s=>({...s,phase:'masking',message:'Applying adaptive weight + pairwise masks…'}));
 
       const myCompanyId = localStorage.getItem('fl_participant')
         ? JSON.parse(localStorage.getItem('fl_participant')!) : null;
       const alpha = event.adaptiveWeights?.[myCompanyId] ?? (1/2);
-      const scaledWeights = localTrainer.applyAdaptiveWeight(rawWeights, alpha);
+      const scaledWeights = await localTrainer.applyAdaptiveWeight(rawWeights, alpha);
 
       const maskRes = await apiClient.get<{assignments:MaskAssignment[]}>('/api/federated/masks');
-      const maskedWeights = localTrainer.applyPairwiseMasks(scaledWeights, maskRes.data.assignments);
+      const maskedWeights = await localTrainer.applyPairwiseMasks(scaledWeights, maskRes.data.assignments);
 
       setStatus(s=>({...s,phase:'submitting',message:'Submitting masked weights…'}));
 
