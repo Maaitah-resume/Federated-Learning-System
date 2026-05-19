@@ -52,6 +52,25 @@
 
 import * as tf from '@tensorflow/tfjs';
 
+// ── CRITICAL: force CPU backend in Web Worker context ────────────────────────
+// Web Workers do not have access to the DOM or WebGL context. TF.js defaults
+// to the WebGL backend which tries to create a canvas — this silently fails
+// in a worker, causing model.fit() to never complete and leaving the main
+// thread's event loop frozen as training falls back to the main thread.
+// Explicitly registering the CPU backend before any tf call ensures TF.js
+// uses pure JavaScript matrix math in the worker's background thread.
+// Training is slower per-batch but the MAIN THREAD STAYS COMPLETELY FREE,
+// which prevents all Socket.IO disconnects, poll storms, and deadlocks.
+(async () => {
+  try {
+    await tf.setBackend('cpu');
+    await tf.ready();
+    console.log('[Worker] TF.js ready — backend:', tf.getBackend());
+  } catch (e) {
+    console.error('[Worker] TF.js init error:', e);
+  }
+})();
+
 interface ParsedDataset {
   rows:           number;
   features:       number;
@@ -69,7 +88,7 @@ interface RoundMetrics {
 // ── Constants ───────────────────────────────────────────────────────────────
 const MASK_SCALE = 0.5;
 const INF_CLAMP  = 1e9;
-const MAX_ROWS   = 2000;
+const MAX_ROWS   = 1000;   // smaller for CPU-backend worker speed
 
 // ── Worker state ─────────────────────────────────────────────────────────────
 let model:          tf.LayersModel | null = null;
@@ -115,12 +134,13 @@ function buildModelFromSchema(features: number, classes: number): tf.LayersModel
   // single-class makes no sense for a federation). This means the output layer
   // size is deterministic from the global schema, and is identical across all
   // clients regardless of which local labels they happen to have.
+  // Compact architecture for CPU-backend Web Worker.
+  // Fewer parameters = faster forward/backward pass = training completes in
+  // ~20-30 s on CPU instead of freezing the main thread for 60-90 s on WebGL.
   const mdl = tf.sequential({
     layers: [
-      tf.layers.dense({ inputShape: [features], units: 128, activation: 'relu', kernelInitializer: 'glorotUniform' }),
+      tf.layers.dense({ inputShape: [features], units: 64, activation: 'relu', kernelInitializer: 'glorotUniform' }),
       tf.layers.batchNormalization(),
-      tf.layers.dropout({ rate: 0.3 }),
-      tf.layers.dense({ units: 64, activation: 'relu' }),
       tf.layers.dropout({ rate: 0.2 }),
       tf.layers.dense({ units: 32, activation: 'relu' }),
       tf.layers.dense({ units: classes, activation: 'softmax' }),
