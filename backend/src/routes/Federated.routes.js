@@ -2,20 +2,32 @@
  * Federated.routes.js
  * backend/src/routes/Federated.routes.js
  *
- * ── FIX: Job membership check on /weights ────────────────────────────────────
- * Previously GET /api/federated/weights returned the current round data to
- * ANY authenticated user, whether or not they were in the active job.
- * This caused Ammar's browser to see Mohammad+Amer's training round via the
- * 5-second polling safety net, trigger runLocalRound, and show "Round N is
- * waiting!" even though Ammar was never part of that job.
+ * ── FIX: alreadySubmitted flag on /weights ────────────────────────────────────
+ * After a page reconnect/refresh, the client's lastSubmittedRoundRef resets to 0.
+ * If the server is still on round N waiting for remaining nodes, the guard
+ *   `if (data.round <= lastSubmittedRoundRef.current)` → `N <= 0` → false
+ * should let the client retrain — BUT if this client already submitted for
+ * round N in a previous socket session, pendingSubmissions already has their
+ * entry, and a second submitWeights() call gets rejected with 409 ("Wrong round"
+ * or duplicate), which Queue.tsx silently swallows.  The client then stays in
+ * 'waiting' phase but the server's received count never reaches expected.
  *
- * Fix: check that req.company.companyId is in activeJob.participantIds.
- * Non-participants get 404 (same as "no active job"), so their poll loop
- * stays quiet and they see only their own idle waiting room.
+ * REAL BUG (confirmed in logs): amer submits round 1, reconnects, gets
+ * round:started replayed with data.round=1, but lastSubmittedRoundRef=1 from
+ * the successful prior submission — so the guard fires and returns early.
+ * The 5-second poll also hits `currentRound(1) > lastSubmitted(1)` → false.
+ * Amer is permanently stuck. Mohammad+ammar keep resubmitting (server dedupes
+ * them at 2/3) but arer never reaches 3/3.
  *
- * The /masks and /submit endpoints already had this guard (getMasksForNode
- * returns null for non-participants → 403).  We align /weights to the same
- * membership semantics.
+ * FIX: /weights now returns `alreadySubmitted: bool` — true when this specific
+ * companyId already has an entry in pendingSubmissions for the current round.
+ * Queue.tsx uses this flag to sync lastSubmittedRoundRef on reconnect:
+ *   - alreadySubmitted=true  → set lastSubmitted = currentRound (already done,
+ *                              don't retrain, wait for round:aggregated)
+ *   - alreadySubmitted=false → if currentRound > lastSubmitted, trigger training
+ *
+ * ── Prior fix: Job membership check on /weights ───────────────────────────────
+ * Non-participants get 404 so their poll loop stays quiet.
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
@@ -34,31 +46,33 @@ router.get('/weights', authenticate, (req, res) => {
   if (!activeJob) return res.status(404).json({ error: 'No active training job' });
 
   // ── Membership check ────────────────────────────────────────────────────────
-  // Only participants of the active job may poll for weights.
-  // Users in a different waiting room (or not queued at all) receive 404 so
-  // their 5-second poll loop treats this the same as "no job running" and
-  // does not attempt to train.
   if (!activeJob.participantIds.includes(companyId)) {
     return res.status(404).json({ error: 'No active training job for this node' });
   }
 
+  // ── Has this node already submitted for the current round? ──────────────────
+  // Exposed so the client can sync lastSubmittedRoundRef after a reconnect.
+  const alreadySubmitted = fedOrch.hasSubmittedForRound(companyId);
+
   if (!globalWeights) {
     return res.status(200).json({
-      hasWeights:      false,
-      jobId:           activeJob.jobId,
-      currentRound:    activeJob.currentRound,
-      totalRounds:     activeJob.totalRounds,
-      adaptiveWeights: activeJob.adaptiveWeights || null,
+      hasWeights:       false,
+      jobId:            activeJob.jobId,
+      currentRound:     activeJob.currentRound,
+      totalRounds:      activeJob.totalRounds,
+      adaptiveWeights:  activeJob.adaptiveWeights || null,
+      alreadySubmitted,
     });
   }
 
   return res.status(200).json({
-    hasWeights:      true,
-    jobId:           activeJob.jobId,
-    currentRound:    activeJob.currentRound,
-    totalRounds:     activeJob.totalRounds,
-    weights:         globalWeights,
-    adaptiveWeights: activeJob.adaptiveWeights || null,
+    hasWeights:       true,
+    jobId:            activeJob.jobId,
+    currentRound:     activeJob.currentRound,
+    totalRounds:      activeJob.totalRounds,
+    weights:          globalWeights,
+    adaptiveWeights:  activeJob.adaptiveWeights || null,
+    alreadySubmitted,
   });
 });
 
