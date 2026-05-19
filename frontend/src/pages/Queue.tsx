@@ -32,10 +32,7 @@ export default function Queue() {
   const inQueueRef            = useRef(false);
   const isTrainingRef         = useRef(false);
   const pendingRoundRef       = useRef<any>(null);
-  const lastSubmittedRoundRef    = useRef(0);
-  const currentlyTrainingRoundRef = useRef(0);  // tracks which round is actively in model.fit()
-  const activeJobIdRef          = useRef<string|null>(null);  // FIX #1: track active job ID independently of inQueue
-  const consecutive404Ref       = useRef(0);    // counts consecutive 404s to detect dead job
+  const lastSubmittedRoundRef = useRef(0);
   const refreshRef            = useRef(refresh);
   useEffect(() => { refreshRef.current = refresh; }, [refresh]);
 
@@ -51,27 +48,6 @@ export default function Queue() {
   const slotsLeft    = Math.max(0, MIN_REQUIRED-queue.count);
   const hasPendingRound = !!pendingRoundRef.current && !dataReady;
 
-  // ── Rebuild model from sessionStorage CSV (used when model dies between rounds) ──
-  const rebuildModelFromSession = useCallback(async () => {
-    const savedText = sessionStorage.getItem('fl_csv_text');
-    const savedName = sessionStorage.getItem('fl_csv_name');
-    if (!savedText || !savedName) {
-      console.warn('[Queue] Cannot rebuild model — no CSV in sessionStorage');
-      return false;
-    }
-    try {
-      console.log('[Queue] Rebuilding model from sessionStorage CSV:', savedName);
-      const blob = new Blob([savedText], { type: 'text/csv' });
-      await localTrainer.loadCSV(new File([blob], savedName, { type: 'text/csv' }));
-      setDataReady(true);
-      console.log('[Queue] Model rebuilt successfully, isReady=', localTrainer.isReady);
-      return true;
-    } catch (err: any) {
-      console.error('[Queue] Failed to rebuild model:', err.message);
-      return false;
-    }
-  }, []);
-
   // ── Core training function ─────────────────────────────────────────────────
   const runLocalRound = useCallback(async (event:{jobId:string;round:number;totalRounds:number;globalWeights:any|null;adaptiveWeights?:Record<string,number>}) => {
     if (event.round <= lastSubmittedRoundRef.current) {
@@ -79,38 +55,21 @@ export default function Queue() {
       return;
     }
     if (isTrainingRef.current) {
-      // If we're already training THIS round, the replay is redundant — ignore it.
-      // Only queue if it's a FUTURE round we haven't started yet.
-      if (event.round === currentlyTrainingRoundRef.current) {
-        console.log('[Queue] Already training round', event.round, '— ignoring replay');
-        return;
-      }
-      console.log('[Queue] Round', event.round, 'queued (training round', currentlyTrainingRoundRef.current, 'in progress)');
+      console.log('[Queue] Round', event.round, 'queued (training in progress)');
       pendingRoundRef.current = event;
       return;
     }
     if (!localTrainer.isReady) {
-      console.log('[Queue] Model not ready — attempting rebuild from sessionStorage for round', event.round);
+      console.log('[Queue] Model not ready — queuing round', event.round);
       pendingRoundRef.current = event;
-      setStatus(s=>({...s,phase:'loading',message:`Round ${event.round} started — restoring model…`}));
-      const rebuilt = await rebuildModelFromSession();
-      if (rebuilt && pendingRoundRef.current && !isTrainingRef.current) {
-        const pending = pendingRoundRef.current;
-        pendingRoundRef.current = null;
-        console.log('[Queue] Model rebuilt — starting queued round', pending.round);
-        runLocalRoundRef.current(pending);
-      } else if (!rebuilt) {
-        setStatus(s=>({...s,phase:'loading',message:`⚡ Round ${event.round} started — load your CSV NOW!`}));
-      }
+      setStatus(s=>({...s,phase:'loading',message:`⚡ Round ${event.round} started — load your CSV NOW!`}));
       return;
     }
 
     isTrainingRef.current = true;
-    currentlyTrainingRoundRef.current = event.round;
-    trainingStartTimeRef.current = Date.now();
     const EPOCHS = 3;
     try {
-      if (event.globalWeights) await localTrainer.applyGlobalWeights(event.globalWeights);
+      if (event.globalWeights) localTrainer.applyGlobalWeights(event.globalWeights);
       setStatus({phase:'training',round:event.round,epoch:0,totalEpochs:EPOCHS,accuracy:null,loss:null,
         message:`Round ${event.round}/${event.totalRounds} — training locally…`});
 
@@ -119,16 +78,16 @@ export default function Queue() {
           message:`Epoch ${epoch+1}/${EPOCHS} — acc: ${((logs?.acc||0)*100).toFixed(1)}%`}));
       });
 
-      const rawWeights = await localTrainer.extractWeights();
+      const rawWeights = localTrainer.extractWeights();
       setStatus(s=>({...s,phase:'masking',message:'Applying adaptive weight + pairwise masks…'}));
 
       const myCompanyId = localStorage.getItem('fl_participant')
         ? JSON.parse(localStorage.getItem('fl_participant')!) : null;
       const alpha = event.adaptiveWeights?.[myCompanyId] ?? (1/2);
-      const scaledWeights = await localTrainer.applyAdaptiveWeight(rawWeights, alpha);
+      const scaledWeights = localTrainer.applyAdaptiveWeight(rawWeights, alpha);
 
       const maskRes = await apiClient.get<{assignments:MaskAssignment[]}>('/api/federated/masks');
-      const maskedWeights = await localTrainer.applyPairwiseMasks(scaledWeights, maskRes.data.assignments);
+      const maskedWeights = localTrainer.applyPairwiseMasks(scaledWeights, maskRes.data.assignments);
 
       setStatus(s=>({...s,phase:'submitting',message:'Submitting masked weights…'}));
 
@@ -140,8 +99,6 @@ export default function Queue() {
       } catch (submitErr: any) {
         if (submitErr?.response?.status === 409) {
           console.warn(`[Queue] Submit round ${event.round} → 409 (server advanced). Skipping.`);
-          // FIX #7: Update lastSubmittedRoundRef so we don't retry this round
-          lastSubmittedRoundRef.current = event.round;
           setStatus(s=>({...s,phase:'waiting',message:`Round ${event.round} skipped — ready for next round`}));
         } else {
           throw submitErr;
@@ -149,7 +106,6 @@ export default function Queue() {
       }
     } catch (err:any) {
       console.error('[Queue] Round error:', err);
-      console.error('[Queue] Round error stack:', err?.stack);
       setStatus(s=>({...s,phase:'idle',message:`Error: ${err.message}`}));
       // FIX BUG 2: do NOT set pendingRoundRef here.
       // Setting it would cause finally → setTimeout(runLocalRound,0) → same
@@ -158,8 +114,7 @@ export default function Queue() {
       // The 5-second polling safety net already retries correctly.
     } finally {
       isTrainingRef.current = false;
-      currentlyTrainingRoundRef.current = 0;
-      if (pendingRoundRef.current && (inQueueRef.current || activeJobIdRef.current)) {
+      if (pendingRoundRef.current && inQueueRef.current) {
         const next = pendingRoundRef.current;
         pendingRoundRef.current = null;
         if (next.round > lastSubmittedRoundRef.current) {
@@ -175,29 +130,6 @@ export default function Queue() {
   const runLocalRoundRef = useRef(runLocalRound);
   useEffect(() => { runLocalRoundRef.current = runLocalRound; }, [runLocalRound]);
 
-  // ── Training watchdog ─────────────────────────────────────────────────────
-  // If isTrainingRef is stuck true for >3 minutes something silently crashed.
-  // Force-reset so the polling safety net can retrigger training.
-  const trainingStartTimeRef = useRef<number>(0);
-  useEffect(() => {
-    const watchdog = setInterval(() => {
-      if (isTrainingRef.current) {
-        const elapsed = Date.now() - trainingStartTimeRef.current;
-        if (elapsed > 3 * 60 * 1000) {
-          console.warn('[Queue] Watchdog: isTrainingRef stuck >3min — force resetting');
-          isTrainingRef.current = false;
-          currentlyTrainingRoundRef.current = 0;
-          setStatus(s => ({ ...s, phase: 'idle', message: 'Training timed out — retrying…' }));
-        }
-      }
-    }, 15000);
-    return () => clearInterval(watchdog);
-  }, []);
-
-  // Prevents simultaneous poll callbacks (from a frozen/thawed event loop)
-  // from all firing runLocalRound at the same time
-  const isPollFiringRef = useRef(false);
-
   // ── POLLING SAFETY NET ────────────────────────────────────────────────────
   // Every 5 s: detect if we are behind on rounds and trigger training via HTTP.
   // This is completely independent of the socket event chain, so it catches
@@ -209,55 +141,28 @@ export default function Queue() {
   //  - No infinite loops: poll checks isTrainingRef before acting
   useEffect(() => {
     const poll = setInterval(async () => {
-      if (isPollFiringRef.current) return;  // another poll callback is already running
-      if (isTrainingRef.current)   return;  // already training
-      // FIX #1: Accept if inQueue OR if we have a tracked active job ID
-      if (!inQueueRef.current && !activeJobIdRef.current) return;
-
-      // If model is not ready but CSV is in sessionStorage, rebuild it
-      if (!localTrainer.isReady) {
-        const savedText = sessionStorage.getItem('fl_csv_text');
-        if (savedText) {
-          console.log('[Queue] Poll: model not ready but CSV exists — rebuilding');
-          const rebuilt = await rebuildModelFromSession();
-          if (!rebuilt) return;  // rebuild failed, wait for next poll
-        } else {
-          return;  // no CSV available
-        }
-      }
-
-      isPollFiringRef.current = true;
+      if (isTrainingRef.current)  return;  // already training
+      if (!inQueueRef.current)    return;  // not in the job
+      if (!localTrainer.isReady)  return;  // CSV/model not loaded
 
       try {
         const res = await apiClient.get<{
-          hasWeights:       boolean;
-          jobId:            string;
-          currentRound:     number;
-          totalRounds:      number;
-          weights?:         any;
+          hasWeights:      boolean;
+          jobId:           string;
+          currentRound:    number;
+          totalRounds:     number;
+          weights?:        any;
           adaptiveWeights?: Record<string,number> | null;
-          alreadySubmitted: boolean;
         }>('/api/federated/weights');
 
-        const { jobId, currentRound, totalRounds, weights, adaptiveWeights, alreadySubmitted } = res.data;
+        const { jobId, currentRound, totalRounds, weights, adaptiveWeights, alreadySubmitted } = res.data as any;
 
-        // Successful response — reset 404 counter
-        consecutive404Ref.current = 0;
-
-        // ── Reconnect sync ──────────────────────────────────────────────────
-        // If the server confirms we already submitted this round (from a
-        // previous socket session before a page refresh), sync
-        // lastSubmittedRoundRef so the dedup guard doesn't block us, and
-        // stay in 'waiting' phase rather than re-triggering training.
+        // If server confirms we already submitted this round (reconnect case),
+        // sync the ref so we stay in 'waiting' without re-triggering training.
         if (alreadySubmitted && currentRound > lastSubmittedRoundRef.current) {
-          console.log(`[Queue] Poll: server confirms round ${currentRound} already submitted — syncing ref`);
           lastSubmittedRoundRef.current = currentRound;
-          setStatus(s => ({
-            ...s,
-            phase:   'waiting',
-            round:   currentRound,
-            message: `Round ${currentRound} submitted — waiting for other nodes…`,
-          }));
+          setStatus(s => ({...s, phase:'waiting', round:currentRound,
+            message:`Round ${currentRound} submitted — waiting for other nodes…`}));
           return;
         }
 
@@ -275,27 +180,10 @@ export default function Queue() {
           });
         }
       } catch (e: any) {
-        if (e?.response?.status === 404) {
-          // 404 = no active job — count consecutive occurrences
-          consecutive404Ref.current++;
-          // After 6 consecutive 404s (~30s), assume job ended/crashed and reset state
-          if (consecutive404Ref.current >= 6) {
-            console.log('[Queue] Poll: 6 consecutive 404s — resetting state');
-            consecutive404Ref.current = 0;
-            isTrainingRef.current = false;
-            currentlyTrainingRoundRef.current = 0;
-            pendingRoundRef.current = null;
-            activeJobIdRef.current = null;
-            // Don't reset lastSubmittedRoundRef — if job restarted, we want to sync
-            setStatus({ phase: 'idle', round: 0, epoch: 0, totalEpochs: 3, accuracy: null, loss: null, message: '' });
-          }
-        } else {
-          // Non-404 error — reset 404 counter but log
-          consecutive404Ref.current = 0;
+        // 404 = no active job (between rounds or job done) — expected, ignore
+        if (e?.response?.status !== 404) {
           console.debug('[Queue] Poll error:', e?.message);
         }
-      } finally {
-        isPollFiringRef.current = false;
       }
     }, 5000);
 
@@ -318,80 +206,34 @@ export default function Queue() {
   // ── inQueue sync ──────────────────────────────────────────────────────────
   useEffect(() => {
     inQueueRef.current = inQueue;
-    // FIX #1: When inQueue becomes true and there's an active job, sync the job ID
-    if (inQueue && queue.activeJob?.jobId) {
-      activeJobIdRef.current = queue.activeJob.jobId;
-    }
-    if (inQueue && pendingRoundRef.current && !isTrainingRef.current) {
+    if (inQueue && pendingRoundRef.current && localTrainer.isReady && !isTrainingRef.current) {
       const pending = pendingRoundRef.current;
       if (pending.round > lastSubmittedRoundRef.current) {
-        // If model is not ready, rebuild first
-        if (!localTrainer.isReady) {
-          console.log('[Queue] inQueue→true: model not ready — rebuilding before pending round', pending.round);
-          rebuildModelFromSession().then((rebuilt) => {
-            if (rebuilt) {
-              pendingRoundRef.current = null;
-              setTimeout(() => runLocalRoundRef.current(pending), 0);
-            }
-          });
-        } else {
-          console.log('[Queue] inQueue→true: processing pending round', pending.round);
-          pendingRoundRef.current = null;
-          setTimeout(() => runLocalRoundRef.current(pending), 0);
-        }
+        console.log('[Queue] inQueue→true: processing pending round', pending.round);
+        pendingRoundRef.current = null;
+        setTimeout(() => runLocalRoundRef.current(pending), 0);
       } else {
         pendingRoundRef.current = null;
       }
     }
-  }, [inQueue, rebuildModelFromSession]);
+  }, [inQueue]);
 
   // ── Socket listeners ──────────────────────────────────────────────────────
   useEffect(() => {
     if (!socket) return;
 
-    const onTrainingStarting = (data:any) => {
-      // FIX #1: Set activeJobIdRef immediately when training starts, BEFORE
-      // the QueueContext poll updates inQueue. This closes the timing gap
-      // where round:started events are ignored because inQueueRef is still false.
-      activeJobIdRef.current = data.jobId;
-      console.log('[Queue] training:starting → job', data.jobId);
-    };
-
-    const onRoundStarted = async (data:any) => {
+    const onRoundStarted = (data:any) => {
       console.log('[Queue] round:started round=', data.round,
         'inQueue=', inQueueRef.current, 'isTraining=', isTrainingRef.current,
-        'modelReady=', localTrainer.isReady, 'lastSubmitted=', lastSubmittedRoundRef.current,
-        'activeJobId=', activeJobIdRef.current);
-
-      // FIX #1: Accept the event if we're in the queue OR if the jobId matches
-      // our tracked active job. This handles the timing gap where inQueueRef
-      // hasn't been updated by the QueueContext poll yet.
-      const isParticipant = inQueueRef.current || activeJobIdRef.current === data.jobId;
-      if (!isParticipant) {
-        console.log('[Queue] Not in queue — ignoring round:started for job', data.jobId);
-        return;
-      }
+        'modelReady=', localTrainer.isReady, 'lastSubmitted=', lastSubmittedRoundRef.current);
 
       if (data.round <= lastSubmittedRoundRef.current) {
         console.log('[Queue] Ignoring already-submitted round', data.round);
         return;
       }
+      if (!inQueueRef.current)   { pendingRoundRef.current = data; return; }
+      if (!localTrainer.isReady) { pendingRoundRef.current = data; return; }
       if (isTrainingRef.current) { pendingRoundRef.current = data; return; }
-
-      // If model is not ready, try to rebuild from sessionStorage before queuing
-      if (!localTrainer.isReady) {
-        console.log('[Queue] Model not ready on round:started — attempting rebuild');
-        pendingRoundRef.current = data;
-        const rebuilt = await rebuildModelFromSession();
-        if (rebuilt && pendingRoundRef.current && !isTrainingRef.current) {
-          const pending = pendingRoundRef.current;
-          pendingRoundRef.current = null;
-          console.log('[Queue] Model rebuilt — starting round', pending.round);
-          runLocalRoundRef.current(pending);
-        }
-        return;
-      }
-
       runLocalRoundRef.current(data);
     };
 
@@ -401,67 +243,35 @@ export default function Queue() {
       setSubmissions(null);
     };
     const onComplete = () => {
-      setStatus({phase:'done',round:0,epoch:0,totalEpochs:3,accuracy:null,loss:null,message:'Training complete!'});
+      setStatus({phase:'done',round:0,epoch:0,totalEpochs:3,accuracy:null,loss:null,message:'🎉 Training complete!'});
       pendingRoundRef.current       = null;
       isTrainingRef.current         = false;
       lastSubmittedRoundRef.current = 0;
-      activeJobIdRef.current        = null;  // FIX #1: clear tracked job ID
-      consecutive404Ref.current     = 0;
       sessionStorage.removeItem('fl_csv_text');
       sessionStorage.removeItem('fl_csv_name');
       localTrainer.dispose();
       refreshRef.current();
     };
 
-    const onError = (data: any) => {
-      console.error('[Queue] training:error:', data.message);
-      setStatus({
-        phase: 'idle', round: 0, epoch: 0, totalEpochs: 3,
-        accuracy: null, loss: null,
-        message: `Training error: ${data.message}`,
-      });
-      pendingRoundRef.current = null;
-      isTrainingRef.current = false;
-      currentlyTrainingRoundRef.current = 0;
-      activeJobIdRef.current = null;
-      consecutive404Ref.current = 0;
-    };
-
-    socket.on('training:starting',   onTrainingStarting);
-    socket.on('round:started',       onRoundStarted);
-    socket.on('weights:submitted',   onWeightsSub);
-    socket.on('training:complete',   onComplete);
-    socket.on('round:aggregated',    onRoundAggregated);
-    socket.on('training:error',      onError);
-    socket.on('round:alreadySubmitted', (data: any) => {
-      console.log('[Queue] round:alreadySubmitted round=', data.round);
-      if (data.round > lastSubmittedRoundRef.current) {
-        lastSubmittedRoundRef.current = data.round;
-      }
-      setStatus(s => ({
-        ...s, phase: 'waiting', round: data.round,
-        message: `Round ${data.round} submitted — waiting for other nodes…`,
-      }));
-    });
+    socket.on('round:started',     onRoundStarted);
+    socket.on('weights:submitted', onWeightsSub);
+    socket.on('training:complete', onComplete);
+    socket.on('round:aggregated',  onRoundAggregated);
     return () => {
-      socket.off('training:starting',   onTrainingStarting);
-      socket.off('round:started',       onRoundStarted);
-      socket.off('weights:submitted',   onWeightsSub);
-      socket.off('training:complete',   onComplete);
-      socket.off('round:aggregated',    onRoundAggregated);
-      socket.off('training:error',      onError);
+      socket.off('round:started',     onRoundStarted);
+      socket.off('weights:submitted', onWeightsSub);
+      socket.off('training:complete', onComplete);
+      socket.off('round:aggregated',  onRoundAggregated);
     };
-  }, [socket, rebuildModelFromSession]);
+  }, [socket]);
 
-  // ── Restore CSV on mount / cleanup on unmount ────────────────────────────
+  // ── Restore CSV on mount ──────────────────────────────────────────────────
   useEffect(() => {
     const savedText = sessionStorage.getItem('fl_csv_text');
     const savedName = sessionStorage.getItem('fl_csv_name');
     if (savedText && savedName) {
-      // Skip if worker already has a model (mid-training page navigation).
-      // Re-running loadCSV disposes the active model causing "already disposed".
       if (localTrainer.isReady) {
-        console.log('[Queue] Worker already ready — skipping sessionStorage restore');
+        // Model already loaded (mid-training page nav) — just restore UI state
         setDataReady(true);
       } else {
         console.log('[Queue] Restoring CSV from sessionStorage:', savedName);
@@ -469,25 +279,10 @@ export default function Queue() {
         handleFileSelectInternal(new File([blob], savedName, {type:'text/csv'}), savedText);
       }
     }
-
-    // Cleanup: only dispose the trainer if the user is NOT actively in a job.
-    // Navigating away mid-training should not kill the model — the CSV is
-    // preserved in sessionStorage and rebuilt on re-entry. Disposing here
-    // when training is active would cause "Container already disposed" because
-    // the socket replay fires applyGlobalWeights on a dead model.
-    return () => {
-      if (!isTrainingRef.current && !inQueueRef.current) {
-        localTrainer.dispose();
-      }
-    };
   }, []);
 
   const handleFileSelectInternal = useCallback(async (selected:File, preloadedText?:string) => {
-    // Never reload the CSV while training is active — this disposes the model.
-    if (isTrainingRef.current) {
-      console.warn('[Queue] CSV load attempted during training — ignored');
-      return;
-    }
+    if (isTrainingRef.current) { console.warn('[Queue] CSV load during training — ignored'); return; }
     setFile(selected); setParseError(null); setDataReady(false); setDataInfo(null);
     setStatus(s=>({...s,phase:'loading',message:'Parsing CSV in browser…'}));
     try {
@@ -495,22 +290,16 @@ export default function Queue() {
       sessionStorage.setItem('fl_csv_text', text);
       sessionStorage.setItem('fl_csv_name', selected.name);
       const meta = await localTrainer.loadCSV(selected);
-      // Only build the model here if there is no pending round.
-      // If a pending round exists, applyGlobalWeights() inside runLocalRound
-      // will call buildModel() itself — calling it twice disposes the model
-      // that was just built and causes "Container is already disposed".
-      const hasPending = !!(pendingRoundRef.current && inQueueRef.current && !isTrainingRef.current
-        && pendingRoundRef.current.round > lastSubmittedRoundRef.current);
-      if (!hasPending) {
-        localTrainer.buildModel();
-      }
+      localTrainer.buildModel();
       setDataReady(true);
       setDataInfo({rows:meta.rows,features:meta.features,classes:meta.classes});
       setStatus(s=>({...s,phase:'idle',message:''}));
-      if (hasPending) {
-        const pending = pendingRoundRef.current!;
-        pendingRoundRef.current = null;
-        setTimeout(() => runLocalRoundRef.current(pending), 0);
+      if (pendingRoundRef.current && inQueueRef.current && !isTrainingRef.current) {
+        const pending = pendingRoundRef.current;
+        if (pending.round > lastSubmittedRoundRef.current) {
+          pendingRoundRef.current = null;
+          setTimeout(() => runLocalRoundRef.current(pending), 0);
+        } else { pendingRoundRef.current = null; }
       }
     } catch (err:any) {
       setParseError(err.message||'Failed to parse CSV');
