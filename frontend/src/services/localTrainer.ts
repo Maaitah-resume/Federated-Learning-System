@@ -1,21 +1,28 @@
 /**
  * localTrainer.ts — frontend/src/services/localTrainer.ts
  *
- * Thin proxy to trainingWorker.ts.
+ * COMPLETE REWRITE.
  *
- * The PUBLIC API is identical to the old localTrainer — Queue.tsx requires
- * zero changes. All TF.js work (loadCSV, buildModel, trainRound, masking)
- * now runs in a Web Worker on a separate OS thread, keeping the main thread
- * fully responsive throughout training.
+ * The old proxy used a single _resolve/_reject pair, which caused deadlocks
+ * when two messages were in flight. The new design uses request IDs so an
+ * arbitrary number of operations can be in flight simultaneously (in practice
+ * we only need 1, but the bug was that even 1 hung if the slot got overwritten
+ * by a spurious message).
  *
- * See trainingWorker.ts for the full implementation and the explanation of
- * why offloading to a worker fixes the round-2 stall permanently.
+ * Public API is identical to the previous version so Queue.tsx does not need
+ * any code changes (only the new `globalSchema` parameter on loadCSV, which
+ * has a sensible default for backwards compatibility).
+ *
+ * KEY ADDITIONS:
+ *   - request ID correlation         (fixes deadlock)
+ *   - heartbeat with auto-recovery   (fixes silent worker death)
+ *   - operation timeout (90 s)       (fixes promises hanging forever)
+ *   - globalSchema parameter         (fixes heterogeneous label sets)
  */
 
-// Vite's ?worker suffix bundles trainingWorker.ts as a Web Worker module
 import TrainingWorkerClass from './trainingWorker?worker';
 
-// ─── Public types (unchanged — Queue.tsx imports these) ───────────────────────
+// ── Public types ─────────────────────────────────────────────────────────────
 export interface ParsedDataset {
   rows:           number;
   features:       number;
@@ -23,7 +30,6 @@ export interface ParsedDataset {
   labelMap:       Record<string, number>;
   droppedColumns: string[];
 }
-
 export interface RoundMetrics {
   accuracy:          number;
   loss:              number;
@@ -33,124 +39,195 @@ export interface RoundMetrics {
   updateNorm:        number;
   updateConsistency: number;
 }
+export interface SerializedWeights { shapes: number[][]; values: number[][] }
+export interface MaskAssignment    { peerId: string; seed: number; role: 'add' | 'sub' }
 
-export interface SerializedWeights {
-  shapes: number[][];
-  values: number[][];
+// ── Pending request bookkeeping ──────────────────────────────────────────────
+interface PendingRequest {
+  resolve:   (v: any) => void;
+  reject:    (e: any) => void;
+  timer:     ReturnType<typeof setTimeout>;
+  onEpoch?:  (epoch: number, logs: any) => void;
+  type:      string;
 }
 
-export interface MaskAssignment {
-  peerId: string;
-  seed:   number;
-  role:   'add' | 'sub';
-}
+const OP_TIMEOUT_MS    = 120_000;   // 2 minutes per operation
+const HEARTBEAT_MS     = 15_000;    // ping the worker every 15 s
+const HEARTBEAT_DEADLINE_MS = 30_000;  // expect a PONG within 30 s
 
-// ─── LocalTrainer (worker proxy) ──────────────────────────────────────────────
 export class LocalTrainer {
-  private worker:   Worker;
-  private _isReady: boolean = false;
-  private _meta:    ParsedDataset | null = null;
+  private worker: Worker;
+  private _isReady = false;
+  private _meta: ParsedDataset | null = null;
+  private _csvText: string | null = null;
+  private _csvName: string | null = null;
+  private _lastSchema: string[] | null = null;
 
-  // One pending promise slot per operation — operations are sequential
-  private _resolve:    ((v: any) => void) | null = null;
-  private _reject:     ((e: any) => void) | null = null;
-  private _onEpochEnd: ((epoch: number, logs: any) => void) | null = null;
+  private pending = new Map<string, PendingRequest>();
+  private nextId = 1;
+  private lastPongAt = Date.now();
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private deadCheckTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor() {
-    this.worker = new TrainingWorkerClass();
-    this.worker.onmessage = this._handleMessage.bind(this);
-    this.worker.onerror   = (e) => {
-      console.error('[LocalTrainer] Worker error:', e.message);
-      this._reject?.(new Error(e.message));
-      this._resolve = null;
-      this._reject  = null;
+    this.worker = this._createWorker();
+    this._startHeartbeat();
+  }
+
+  // ── Worker lifecycle ─────────────────────────────────────────────────────────
+  private _createWorker(): Worker {
+    const w = new TrainingWorkerClass();
+    w.onmessage = (e) => this._handleMessage(e);
+    w.onerror   = (e) => {
+      console.error('[LocalTrainer] worker.onerror:', e.message);
+      this._rejectAllPending(new Error(`Worker error: ${e.message}`));
     };
+    this.lastPongAt = Date.now();
+    return w;
   }
 
-  private _handleMessage(e: MessageEvent) {
-    const { type, payload } = e.data;
-    switch (type) {
-      case 'CSV_LOADED':
-        this._meta    = payload;
-        this._isReady = true;
-        this._resolve?.(payload);
-        break;
-      case 'WEIGHTS_APPLIED':
-        this._resolve?.(undefined);
-        break;
-      case 'EPOCH_END':
-        this._onEpochEnd?.(payload.epoch, payload.logs);
-        return; // don't clear resolver — training still in progress
-      case 'TRAIN_COMPLETE':
-        this._resolve?.(payload);
-        break;
-      case 'WEIGHTS_READY':
-        this._resolve?.(payload);
-        break;
-      case 'ALPHA_APPLIED':
-        this._resolve?.(payload);
-        break;
-      case 'MASKS_APPLIED':
-        this._resolve?.(payload);
-        break;
-      case 'DISPOSED':
-        // FIX #3: Worker confirmed dispose — reject any pending promise
-        this._reject?.(new Error('Model disposed'));
-        break;
-      case 'ERROR':
-        this._reject?.(new Error(payload.message));
-        break;
-      default:
-        return;
-    }
-    this._resolve    = null;
-    this._reject     = null;
-    this._onEpochEnd = null;
+  private _startHeartbeat() {
+    this.heartbeatTimer = setInterval(() => {
+      const id = this._nextId();
+      try { this.worker.postMessage({ id, type: 'PING' }); }
+      catch (e) { console.warn('[LocalTrainer] heartbeat post failed:', e); }
+    }, HEARTBEAT_MS);
+
+    this.deadCheckTimer = setInterval(() => {
+      const since = Date.now() - this.lastPongAt;
+      if (since > HEARTBEAT_DEADLINE_MS) {
+        console.error(`[LocalTrainer] Worker unresponsive for ${since}ms — recreating`);
+        this._recoverWorker();
+      }
+    }, HEARTBEAT_MS);
   }
 
-  private _send<T>(msg: object): Promise<T> {
-    return new Promise((resolve, reject) => {
-      this._resolve = resolve;
-      this._reject  = reject;
-      this.worker.postMessage(msg);
-      // FIX #3: Timeout after 5 minutes so promises never hang forever
-      const timer = setTimeout(() => {
-        if (this._reject) {
-          this._reject(new Error('Worker operation timed out (5 min)'));
-          this._resolve = null;
-          this._reject  = null;
-        }
-      }, 5 * 60 * 1000);
-      // Wrap resolve/reject to clear the timer
-      const origResolve = this._resolve;
-      const origReject  = this._reject;
-      this._resolve = (v: any) => { clearTimeout(timer); origResolve?.(v); };
-      this._reject  = (e: any) => { clearTimeout(timer); origReject?.(e); };
-    });
-  }
-
-  // ── Public API ────────────────────────────────────────────────────────────────
-
-  async loadCSV(file: File): Promise<ParsedDataset> {
-    const csvText = await file.text();
+  private async _recoverWorker() {
+    this._rejectAllPending(new Error('Worker unresponsive — recreated'));
+    try { this.worker.terminate(); } catch {}
     this._isReady = false;
-    const meta = await this._send<ParsedDataset>({
-      type: 'LOAD_CSV',
-      payload: { csvText, fileName: file.name },
+    this.worker = this._createWorker();
+    // Auto-restore the CSV if we have one cached
+    if (this._csvText && this._csvName && this._lastSchema) {
+      try {
+        const blob = new Blob([this._csvText], { type: 'text/csv' });
+        await this.loadCSV(new File([blob], this._csvName, { type: 'text/csv' }), this._lastSchema);
+        console.log('[LocalTrainer] Worker recovered — CSV restored');
+      } catch (e) {
+        console.error('[LocalTrainer] CSV restore after recovery failed:', e);
+      }
+    }
+  }
+
+  private _rejectAllPending(err: Error) {
+    for (const [id, p] of this.pending.entries()) {
+      clearTimeout(p.timer);
+      try { p.reject(err); } catch {}
+      this.pending.delete(id);
+    }
+  }
+
+  // ── Message handling ─────────────────────────────────────────────────────────
+  private _handleMessage(e: MessageEvent) {
+    const { id, type, payload } = e.data;
+
+    // Heartbeat PONG — update liveness clock and exit (no pending entry)
+    if (type === 'PONG') {
+      this.lastPongAt = Date.now();
+      return;
+    }
+
+    const p = this.pending.get(id);
+    if (!p) {
+      // Late message after timeout/recovery — safe to ignore
+      return;
+    }
+
+    // Progress event during training — call the onEpoch callback but don't resolve
+    if (type === 'EPOCH_END' && p.onEpoch) {
+      try { p.onEpoch(payload.epoch, payload.logs); } catch {}
+      return;
+    }
+
+    // Terminal message: OK or ERROR
+    clearTimeout(p.timer);
+    this.pending.delete(id);
+    if (type === 'ERROR') {
+      p.reject(new Error(payload?.message || 'Unknown worker error'));
+    } else {
+      p.resolve(payload);
+    }
+  }
+
+  // ── Request helper ───────────────────────────────────────────────────────────
+  private _nextId(): string {
+    return `r${this.nextId++}`;
+  }
+
+  private _send<T>(type: string, payload?: any, onEpoch?: (e: number, l: any) => void): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const id = this._nextId();
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`Worker operation '${type}' timed out after ${OP_TIMEOUT_MS}ms`));
+      }, OP_TIMEOUT_MS);
+      this.pending.set(id, { resolve, reject, timer, onEpoch, type });
+      try {
+        this.worker.postMessage({ id, type, payload });
+      } catch (err: any) {
+        clearTimeout(timer);
+        this.pending.delete(id);
+        reject(new Error(`postMessage failed: ${err?.message}`));
+      }
     });
+  }
+
+  // ── Public API ───────────────────────────────────────────────────────────────
+
+  /**
+   * Load a CSV with a global label schema.
+   * Every client in a federation must call this with the SAME schema so the
+   * output layers match exactly.
+   */
+  async loadCSV(file: File, globalSchema?: string[]): Promise<ParsedDataset> {
+    const csvText = await file.text();
+    this._csvText = csvText;
+    this._csvName = file.name;
+    this._isReady = false;
+
+    // If no schema provided, derive one from the local CSV (legacy behaviour).
+    // This is only safe when all clients have the same labels — the new
+    // schema endpoint provides one globally agreed list.
+    const schema = globalSchema ?? this._deriveLocalSchema(csvText);
+    this._lastSchema = schema;
+
+    const meta = await this._send<ParsedDataset>('LOAD_CSV', { csvText, schema });
     this._meta = meta;
+    this._isReady = true;
     return meta;
   }
 
-  // buildModel is kept for API compatibility — the worker manages the model
-  // lifecycle internally (builds after loadCSV and after applyGlobalWeights)
-  buildModel(): void {}
+  private _deriveLocalSchema(csvText: string): string[] {
+    const lines = csvText.trim().split('\n');
+    if (lines.length < 2) return ['BENIGN', 'OTHER'];
+    const header = lines[0].split(',');
+    const labelCol = header.length - 1;
+    const set = new Set<string>();
+    for (let i = 1; i < lines.length; i++) {
+      const cols = lines[i].split(',');
+      const lbl = (cols[labelCol] ?? '').trim().replace(/"/g, '');
+      const norm = lbl.toLowerCase();
+      if (norm && norm !== 'label' && norm !== 'null' && norm !== 'nan') set.add(lbl);
+    }
+    const arr = [...set].sort();
+    if (!arr.includes('OTHER')) arr.push('OTHER');
+    return arr;
+  }
+
+  buildModel(): void { /* worker manages model lifecycle internally */ }
 
   async applyGlobalWeights(serialized: SerializedWeights): Promise<void> {
-    await this._send<void>({
-      type: 'APPLY_WEIGHTS',
-      payload: { serializedWeights: serialized },
-    });
+    await this._send<void>('APPLY_WEIGHTS', { serializedWeights: serialized });
   }
 
   async trainRound(
@@ -158,33 +235,23 @@ export class LocalTrainer {
     batchSize = 32,
     onEpochEnd?: (epoch: number, logs: any) => void,
   ): Promise<RoundMetrics> {
-    this._onEpochEnd = onEpochEnd ?? null;
-    return this._send<RoundMetrics>({
-      type: 'TRAIN',
-      payload: { epochs, batchSize },
-    });
+    return this._send<RoundMetrics>('TRAIN', { epochs, batchSize }, onEpochEnd);
   }
 
   async extractWeights(): Promise<SerializedWeights> {
-    return this._send<SerializedWeights>({ type: 'EXTRACT_WEIGHTS' });
+    return this._send<SerializedWeights>('EXTRACT_WEIGHTS');
   }
 
   async applyAdaptiveWeight(weights: SerializedWeights, alpha: number): Promise<SerializedWeights> {
-    return this._send<SerializedWeights>({
-      type: 'APPLY_ALPHA',
-      payload: { weights, alpha },
-    });
+    return this._send<SerializedWeights>('APPLY_ALPHA', { weights, alpha });
   }
 
   async applyPairwiseMasks(weights: SerializedWeights, assignments: MaskAssignment[]): Promise<SerializedWeights> {
-    return this._send<SerializedWeights>({
-      type: 'APPLY_MASKS',
-      payload: { weights, assignments },
-    });
+    return this._send<SerializedWeights>('APPLY_MASKS', { weights, assignments });
   }
 
   dispose(): void {
-    this.worker.postMessage({ type: 'DISPOSE' });
+    try { this.worker.postMessage({ id: this._nextId(), type: 'DISPOSE' }); } catch {}
     this._isReady = false;
     this._meta    = null;
   }
