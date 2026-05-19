@@ -49,6 +49,27 @@ export default function Queue() {
   const slotsLeft    = Math.max(0, MIN_REQUIRED-queue.count);
   const hasPendingRound = !!pendingRoundRef.current && !dataReady;
 
+  // ── Rebuild model from sessionStorage CSV (used when model dies between rounds) ──
+  const rebuildModelFromSession = useCallback(async () => {
+    const savedText = sessionStorage.getItem('fl_csv_text');
+    const savedName = sessionStorage.getItem('fl_csv_name');
+    if (!savedText || !savedName) {
+      console.warn('[Queue] Cannot rebuild model — no CSV in sessionStorage');
+      return false;
+    }
+    try {
+      console.log('[Queue] Rebuilding model from sessionStorage CSV:', savedName);
+      const blob = new Blob([savedText], { type: 'text/csv' });
+      await localTrainer.loadCSV(new File([blob], savedName, { type: 'text/csv' }));
+      setDataReady(true);
+      console.log('[Queue] Model rebuilt successfully, isReady=', localTrainer.isReady);
+      return true;
+    } catch (err: any) {
+      console.error('[Queue] Failed to rebuild model:', err.message);
+      return false;
+    }
+  }, []);
+
   // ── Core training function ─────────────────────────────────────────────────
   const runLocalRound = useCallback(async (event:{jobId:string;round:number;totalRounds:number;globalWeights:any|null;adaptiveWeights?:Record<string,number>}) => {
     if (event.round <= lastSubmittedRoundRef.current) {
@@ -67,9 +88,18 @@ export default function Queue() {
       return;
     }
     if (!localTrainer.isReady) {
-      console.log('[Queue] Model not ready — queuing round', event.round);
+      console.log('[Queue] Model not ready — attempting rebuild from sessionStorage for round', event.round);
       pendingRoundRef.current = event;
-      setStatus(s=>({...s,phase:'loading',message:`⚡ Round ${event.round} started — load your CSV NOW!`}));
+      setStatus(s=>({...s,phase:'loading',message:`Round ${event.round} started — restoring model…`}));
+      const rebuilt = await rebuildModelFromSession();
+      if (rebuilt && pendingRoundRef.current && !isTrainingRef.current) {
+        const pending = pendingRoundRef.current;
+        pendingRoundRef.current = null;
+        console.log('[Queue] Model rebuilt — starting queued round', pending.round);
+        runLocalRoundRef.current(pending);
+      } else if (!rebuilt) {
+        setStatus(s=>({...s,phase:'loading',message:`⚡ Round ${event.round} started — load your CSV NOW!`}));
+      }
       return;
     }
 
@@ -177,7 +207,19 @@ export default function Queue() {
       if (isPollFiringRef.current) return;  // another poll callback is already running
       if (isTrainingRef.current)   return;  // already training
       if (!inQueueRef.current)     return;  // not in the job
-      if (!localTrainer.isReady)   return;  // CSV/model not loaded
+
+      // If model is not ready but CSV is in sessionStorage, rebuild it
+      if (!localTrainer.isReady) {
+        const savedText = sessionStorage.getItem('fl_csv_text');
+        if (savedText) {
+          console.log('[Queue] Poll: model not ready but CSV exists — rebuilding');
+          const rebuilt = await rebuildModelFromSession();
+          if (!rebuilt) return;  // rebuild failed, wait for next poll
+        } else {
+          return;  // no CSV available
+        }
+      }
+
       isPollFiringRef.current = true;
 
       try {
@@ -252,34 +294,38 @@ export default function Queue() {
   // ── inQueue sync ──────────────────────────────────────────────────────────
   useEffect(() => {
     inQueueRef.current = inQueue;
-    if (inQueue && pendingRoundRef.current && localTrainer.isReady && !isTrainingRef.current) {
+    if (inQueue && pendingRoundRef.current && !isTrainingRef.current) {
       const pending = pendingRoundRef.current;
       if (pending.round > lastSubmittedRoundRef.current) {
-        console.log('[Queue] inQueue→true: processing pending round', pending.round);
-        pendingRoundRef.current = null;
-        setTimeout(() => runLocalRoundRef.current(pending), 0);
+        // If model is not ready, rebuild first
+        if (!localTrainer.isReady) {
+          console.log('[Queue] inQueue→true: model not ready — rebuilding before pending round', pending.round);
+          rebuildModelFromSession().then((rebuilt) => {
+            if (rebuilt) {
+              pendingRoundRef.current = null;
+              setTimeout(() => runLocalRoundRef.current(pending), 0);
+            }
+          });
+        } else {
+          console.log('[Queue] inQueue→true: processing pending round', pending.round);
+          pendingRoundRef.current = null;
+          setTimeout(() => runLocalRoundRef.current(pending), 0);
+        }
       } else {
         pendingRoundRef.current = null;
       }
     }
-  }, [inQueue]);
+  }, [inQueue, rebuildModelFromSession]);
 
   // ── Socket listeners ──────────────────────────────────────────────────────
   useEffect(() => {
     if (!socket) return;
 
-    const onRoundStarted = (data:any) => {
+    const onRoundStarted = async (data:any) => {
       console.log('[Queue] round:started round=', data.round,
         'inQueue=', inQueueRef.current, 'isTraining=', isTrainingRef.current,
         'modelReady=', localTrainer.isReady, 'lastSubmitted=', lastSubmittedRoundRef.current);
 
-      // ── FIX: Drop events for jobs this node is not part of ────────────────
-      // This is a broadcast event — all connected sockets receive it.
-      // If this user is not in the queue (inQueueRef=false) they are either
-      // idle or in a *different* room waiting for their own partners.
-      // They must NOT queue or act on another room's training event.
-      // Previously this set pendingRoundRef even for non-participants, causing
-      // the "Round N is waiting!" banner to appear for unrelated users.
       if (!inQueueRef.current) {
         console.log('[Queue] Not in queue — ignoring round:started for job', data.jobId);
         return;
@@ -289,8 +335,22 @@ export default function Queue() {
         console.log('[Queue] Ignoring already-submitted round', data.round);
         return;
       }
-      if (!localTrainer.isReady) { pendingRoundRef.current = data; return; }
       if (isTrainingRef.current) { pendingRoundRef.current = data; return; }
+
+      // If model is not ready, try to rebuild from sessionStorage before queuing
+      if (!localTrainer.isReady) {
+        console.log('[Queue] Model not ready on round:started — attempting rebuild');
+        pendingRoundRef.current = data;
+        const rebuilt = await rebuildModelFromSession();
+        if (rebuilt && pendingRoundRef.current && !isTrainingRef.current) {
+          const pending = pendingRoundRef.current;
+          pendingRoundRef.current = null;
+          console.log('[Queue] Model rebuilt — starting round', pending.round);
+          runLocalRoundRef.current(pending);
+        }
+        return;
+      }
+
       runLocalRoundRef.current(data);
     };
 
