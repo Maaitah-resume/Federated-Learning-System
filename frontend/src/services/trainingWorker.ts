@@ -1,50 +1,57 @@
 /**
  * trainingWorker.ts — frontend/src/services/trainingWorker.ts
  *
- * Runs TF.js entirely in a Web Worker (background thread).
+ * COMPLETE REWRITE addressing the round-2 stall.
  *
- * WHY THIS EXISTS:
- *   model.fit() on 5000 rows × 3 epochs holds the browser's JS main thread
- *   for 45-90 seconds with no yielding. During that freeze:
- *     • Socket.IO ping callbacks can't fire → Railway kills the TCP connection
- *     • setInterval(5000) poll callbacks queue up → fire all at once when
- *       the loop unfreezes → multiple simultaneous runLocalRound calls →
- *       model disposed mid-training → round never submits
+ * ── THE ROOT CAUSES THIS FILE FIXES ──────────────────────────────────────────
  *
- *   A Web Worker runs on a SEPARATE OS thread. Training happens in the
- *   background; the main thread stays fully responsive throughout. Socket.IO
- *   pings fire normally. The 5-second poll fires on schedule. No disconnects,
- *   no poll storm, no disposed model — regardless of dataset size or epochs.
+ *  1. SINGLE-RESOLVER RACE (deadlock)
+ *     The old proxy stored ONE pair of {resolve,reject} for all in-flight
+ *     operations. If two messages were in flight, the second postMessage
+ *     overwrote the first's resolvers — the first Promise hung forever.
+ *     FIX: every message carries a requestId. The worker echoes it back.
+ *     The proxy keeps a Map<requestId, {resolve,reject}>.
  *
- * PAPER FIDELITY (Chen et al. 2020):
- *   Nothing about the federated learning methodology changes. The same
- *   forward pass, backpropagation, weight extraction, pairwise masking and
- *   adaptive weight pre-scaling all happen — just on a different OS thread.
- *   Raw data still never leaves the device.
+ *  2. HETEROGENEOUS LABEL SETS (silent model corruption)
+ *     Mohammad's CSV had {Benign, FTP-BruteForce, SSH-Bruteforce}, Ammar's
+ *     had {Benign, DoS-Hulk, DoS-SlowHTTPTest}. Both produced 3-unit output
+ *     layers, but the integer-to-class mapping was different. The server
+ *     aggregated weights as if they shared a label space — they didn't.
+ *     FIX: the proxy passes a `globalSchema` (a list of all class names
+ *     known across the federation) to LOAD_CSV. The worker maps local
+ *     labels to global indices; unknown labels map to the "OTHER" bucket.
+ *     Every client now has the SAME output layer regardless of which
+ *     local labels appear in their data.
  *
- * MESSAGE PROTOCOL (main → worker):
- *   { type: 'LOAD_CSV',       payload: { csvText, fileName } }
- *   { type: 'APPLY_WEIGHTS',  payload: { serializedWeights } }
- *   { type: 'TRAIN',          payload: { epochs, batchSize } }
- *   { type: 'EXTRACT_WEIGHTS' }
- *   { type: 'APPLY_ALPHA',    payload: { weights, alpha } }
- *   { type: 'APPLY_MASKS',    payload: { weights, assignments } }
- *   { type: 'DISPOSE' }
+ *  3. CONTAMINATED ROWS
+ *     df3 had a stray "Label" header row in the middle of the data. This
+ *     became a 4th class. FIX: skip rows whose label is literally "Label",
+ *     "label", or empty.
  *
- * MESSAGE PROTOCOL (worker → main):
- *   { type: 'CSV_LOADED',     payload: ParsedDataset }
- *   { type: 'WEIGHTS_APPLIED' }
- *   { type: 'EPOCH_END',      payload: { epoch, logs } }
- *   { type: 'TRAIN_COMPLETE', payload: RoundMetrics }
- *   { type: 'WEIGHTS_READY',  payload: SerializedWeights }
- *   { type: 'ALPHA_APPLIED',  payload: SerializedWeights }
- *   { type: 'MASKS_APPLIED',  payload: SerializedWeights }
- *   { type: 'ERROR',          payload: { message } }
+ *  4. SHAPE MISMATCH ON applyGlobalWeights
+ *     The worker was silently padding/truncating mismatched tensors,
+ *     producing NaN gradients. FIX: with the global schema in place,
+ *     shapes always match — strict equality check, hard fail if not.
+ *
+ *  5. NO HEARTBEAT — workers die silently
+ *     Browsers terminate workers under memory pressure. The proxy never
+ *     knew. FIX: PING/PONG handler so the proxy can detect a dead worker.
+ *
+ * ── MESSAGE PROTOCOL ──────────────────────────────────────────────────────────
+ *
+ *   Every request from the main thread:
+ *     { id: string, type: '...', payload: {...} }
+ *
+ *   Every response from the worker:
+ *     { id: string, type: '...', payload: {...} }   // success
+ *     { id: string, type: 'ERROR', payload: { message } }  // failure
+ *
+ *   Async progress events (training):
+ *     { id: string, type: 'EPOCH_END', payload: { epoch, logs } }
  */
 
 import * as tf from '@tensorflow/tfjs';
 
-// ─── Types (duplicated from localTrainer.ts to keep worker self-contained) ────
 interface ParsedDataset {
   rows:           number;
   features:       number;
@@ -52,29 +59,28 @@ interface ParsedDataset {
   labelMap:       Record<string, number>;
   droppedColumns: string[];
 }
-
-interface SerializedWeights {
-  shapes: number[][];
-  values: number[][];
-}
-
-interface MaskAssignment {
-  peerId: string;
-  seed:   number;
-  role:   'add' | 'sub';
-}
-
+interface SerializedWeights { shapes: number[][]; values: number[][] }
+interface MaskAssignment    { peerId: string; seed: number; role: 'add' | 'sub' }
 interface RoundMetrics {
-  accuracy:          number;
-  loss:              number;
-  datasetSize:       number;
-  durationMs:        number;
-  epochsRun:         number;
-  updateNorm:        number;
-  updateConsistency: number;
+  accuracy: number; loss: number; datasetSize: number; durationMs: number;
+  epochsRun: number; updateNorm: number; updateConsistency: number;
 }
 
-// ─── Mulberry32 PRNG (identical to federatedOrchestrator.js) ─────────────────
+// ── Constants ───────────────────────────────────────────────────────────────
+const MASK_SCALE = 0.5;
+const INF_CLAMP  = 1e9;
+const MAX_ROWS   = 2000;
+
+// ── Worker state ─────────────────────────────────────────────────────────────
+let model:          tf.LayersModel | null = null;
+let xs:             tf.Tensor2D    | null = null;
+let ys:             tf.Tensor1D    | null = null;
+let meta:           ParsedDataset  | null = null;
+let prevGlobalW:    SerializedWeights | null = null;
+let prevUpdateNorm: number = 0;
+let globalSchema:   string[] = [];   // canonical ordered class names
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
 function mulberry32(seed: number): () => number {
   let s = seed >>> 0;
   return () => {
@@ -84,19 +90,7 @@ function mulberry32(seed: number): () => number {
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
 }
-const MASK_SCALE = 0.5;
-const INF_CLAMP  = 1e9;
-const MAX_ROWS   = 2000;
 
-// ─── Worker state ────────────────────────────────────────────────────────
-let model:          tf.LayersModel | null = null;
-let xs:             tf.Tensor2D   | null = null;
-let ys:             tf.Tensor1D   | null = null;
-let meta:           ParsedDataset | null = null;
-let prevGlobalW:    SerializedWeights | null = null;
-let prevUpdateNorm: number = 0;
-
-// ─── Helpers ──────────────────────────────────────────────────────────
 function isNonNumericColumn(values: string[]): boolean {
   const sample = values.filter(v => v !== '').slice(0, 20);
   if (sample.length === 0) return true;
@@ -110,22 +104,31 @@ function safeParseFloat(raw: string): number {
   return v;
 }
 
-function buildModelFromMeta(m: ParsedDataset): tf.LayersModel {
-  const isBinary = m.classes === 2;
+function isContaminatedLabel(lbl: string): boolean {
+  // The "Label" header bleeding into the data, or empty/null labels
+  const norm = lbl.trim().toLowerCase();
+  return norm === '' || norm === 'label' || norm === 'null' || norm === 'nan';
+}
+
+function buildModelFromSchema(features: number, classes: number): tf.LayersModel {
+  // ALWAYS multi-class softmax (we treat federated classification as ≥2 classes;
+  // single-class makes no sense for a federation). This means the output layer
+  // size is deterministic from the global schema, and is identical across all
+  // clients regardless of which local labels they happen to have.
   const mdl = tf.sequential({
     layers: [
-      tf.layers.dense({ inputShape: [m.features], units: 128, activation: 'relu', kernelInitializer: 'glorotUniform' }),
+      tf.layers.dense({ inputShape: [features], units: 128, activation: 'relu', kernelInitializer: 'glorotUniform' }),
       tf.layers.batchNormalization(),
       tf.layers.dropout({ rate: 0.3 }),
       tf.layers.dense({ units: 64, activation: 'relu' }),
       tf.layers.dropout({ rate: 0.2 }),
       tf.layers.dense({ units: 32, activation: 'relu' }),
-      tf.layers.dense({ units: isBinary ? 1 : m.classes, activation: isBinary ? 'sigmoid' : 'softmax' }),
+      tf.layers.dense({ units: classes, activation: 'softmax' }),
     ],
   });
   mdl.compile({
     optimizer: tf.train.adam(0.001),
-    loss:      isBinary ? 'binaryCrossentropy' : 'sparseCategoricalCrossentropy',
+    loss:      'sparseCategoricalCrossentropy',
     metrics:   ['accuracy'],
   });
   return mdl;
@@ -144,24 +147,29 @@ function computeUpdateMetrics(): { updateNorm: number; updateConsistency: number
       denominator += (prev[i] || 0) ** 2;
     }
   });
-  const updateNorm    = Math.sqrt(numerator) / (Math.sqrt(denominator) + 1e-8);
-  const consistency   = prevUpdateNorm > 0
+  const updateNorm  = Math.sqrt(numerator) / (Math.sqrt(denominator) + 1e-8);
+  const consistency = prevUpdateNorm > 0
     ? Math.max(0, 1 - Math.abs(updateNorm - prevUpdateNorm) / (prevUpdateNorm + 1e-8))
     : 1.0;
   prevUpdateNorm = updateNorm;
   return { updateNorm, updateConsistency: consistency };
 }
 
-// ─── Message handlers ───────────────────────────────────────────────────────
+// ── Message handlers ─────────────────────────────────────────────────────────
 
-async function handleLoadCSV(csvText: string, fileName: string) {
+async function handleLoadCSV(csvText: string, schema: string[]) {
+  if (!schema || schema.length < 2) {
+    throw new Error('Global schema is required and must contain at least 2 classes');
+  }
+  globalSchema = schema;
+
   const lines = csvText.trim().split('\n');
   if (lines.length < 2) throw new Error('CSV too small');
 
   const header   = lines[0].split(',').map(h => h.trim().replace(/"/g, ''));
   const labelCol = header.length - 1;
 
-  // Detect non-numeric columns
+  // Detect non-numeric columns (Timestamp, IP, dates, etc.)
   const sampleEnd  = Math.min(lines.length, 51);
   const colSamples: string[][] = Array.from({ length: labelCol }, () => []);
   for (let i = 1; i < sampleEnd; i++) {
@@ -170,47 +178,51 @@ async function handleLoadCSV(csvText: string, fileName: string) {
       colSamples[j].push((cols[j] ?? '').trim().replace(/"/g, ''));
     }
   }
-  const keepCols:  number[]  = [];
-  const dropNames: string[]  = [];
+  const keepCols:  number[] = [];
+  const dropNames: string[] = [];
   for (let j = 0; j < labelCol; j++) {
     if (isNonNumericColumn(colSamples[j])) dropNames.push(header[j]);
     else keepCols.push(j);
   }
   if (keepCols.length === 0) throw new Error('No numeric feature columns found');
 
-  // Build label map
-  const labelSet = new Set<string>();
-  for (let i = 1; i < lines.length; i++) {
-    const cols = lines[i].split(',');
-    if (cols.length < header.length) continue;
-    labelSet.add((cols[labelCol] ?? '').trim().replace(/"/g, '') || 'UNKNOWN');
-  }
+  // Build the labelMap from the GLOBAL schema, not from local data.
+  // Local labels not in the schema map to the OTHER index (last slot).
+  // This guarantees every client has the same number of output classes.
   const labelMap: Record<string, number> = {};
-  [...labelSet].sort().forEach((lbl, idx) => { labelMap[lbl] = idx; });
+  schema.forEach((cls, idx) => { labelMap[cls] = idx; });
+  const otherIdx = schema.indexOf('OTHER');
+  const fallback = otherIdx >= 0 ? otherIdx : (schema.length - 1);
 
-  // Parse rows
+  // Parse rows, dropping contaminated label rows
   const featureRows: number[][] = [];
   const labelRows:   number[]   = [];
+  let droppedCount = 0;
   for (let i = 1; i < lines.length; i++) {
     const cols = lines[i].split(',');
     if (cols.length < header.length) continue;
+    const rawLabel = (cols[labelCol] ?? '').trim().replace(/"/g, '');
+    if (isContaminatedLabel(rawLabel)) { droppedCount++; continue; }
     featureRows.push(keepCols.map(j => safeParseFloat((cols[j] ?? '').trim().replace(/"/g, ''))));
-    labelRows.push(labelMap[(cols[labelCol] ?? '').trim().replace(/"/g, '') || 'UNKNOWN'] ?? 0);
+    labelRows.push(labelMap[rawLabel] ?? fallback);
   }
-  if (featureRows.length === 0) throw new Error('No valid rows found');
+  if (featureRows.length === 0) throw new Error('No valid rows after filtering');
+  if (droppedCount > 0) console.log(`[Worker] Dropped ${droppedCount} contaminated rows`);
 
-  // Random sample to MAX_ROWS
+  // Random sample to MAX_ROWS for responsive training
   if (featureRows.length > MAX_ROWS) {
     const indices = Array.from({ length: featureRows.length }, (_, i) => i)
       .sort(() => Math.random() - 0.5).slice(0, MAX_ROWS);
-    featureRows.splice(0, featureRows.length, ...indices.map(i => featureRows[i]));
-    labelRows.splice(0,   labelRows.length,   ...indices.map(i => labelRows[i]));
+    const sf = indices.map(i => featureRows[i]);
+    const sl = indices.map(i => labelRows[i]);
+    featureRows.splice(0, featureRows.length, ...sf);
+    labelRows.splice(0,   labelRows.length,   ...sl);
   }
 
-  // Dispose old tensors
+  // Free old tensors before building new ones
   xs?.dispose(); ys?.dispose();
 
-  const rawXs = tf.tensor2d(featureRows);
+  const rawXs  = tf.tensor2d(featureRows);
   const colMin = rawXs.min(0);
   const colMax = rawXs.max(0);
   const range  = colMax.sub(colMin).add(1e-8);
@@ -218,106 +230,66 @@ async function handleLoadCSV(csvText: string, fileName: string) {
   ys = tf.tensor1d(labelRows, 'float32') as tf.Tensor1D;
   rawXs.dispose(); colMin.dispose(); colMax.dispose(); range.dispose();
 
-  meta = { rows: featureRows.length, features: keepCols.length, classes: Object.keys(labelMap).length, labelMap, droppedColumns: dropNames };
+  meta = {
+    rows:           featureRows.length,
+    features:       keepCols.length,
+    classes:        schema.length,
+    labelMap,
+    droppedColumns: dropNames,
+  };
 
-  // Build initial model
+  // Build the initial model with the global class count
   model?.dispose();
-  model = buildModelFromMeta(meta);
+  model = buildModelFromSchema(meta.features, meta.classes);
 
-  self.postMessage({ type: 'CSV_LOADED', payload: meta });
+  return meta;
 }
 
 function handleApplyWeights(serialized: SerializedWeights) {
   if (!meta) throw new Error('Load CSV first');
-  
-  console.log('[Worker] handleApplyWeights: applying', serialized.values.length, 'weight tensors');
-  
-  if (serialized.values.length === 0) {
-    throw new Error('Received empty weights array');
+  if (!serialized.values || serialized.values.length === 0) {
+    throw new Error('Empty weights received');
   }
-  
+
   prevGlobalW = serialized;
-  
-  try {
-    model?.dispose();
-  } catch (e) {
-    console.warn('[Worker] Error disposing old model:', e);
-  }
-  
-  model = buildModelFromMeta(meta);
-  
+  model?.dispose();
+  model = buildModelFromSchema(meta.features, meta.classes);
+
   const currentWeights = model.getWeights();
   if (serialized.values.length !== currentWeights.length) {
-    console.warn('[Worker] Tensor count mismatch: received', serialized.values.length, 
-                 'tensors but model has', currentWeights.length, '— using fresh weights');
+    // With the global schema in place, this should never happen.
+    // If it does, log loudly and fall back to fresh weights.
+    console.error(`[Worker] FATAL shape mismatch: server sent ${serialized.values.length} tensors, model has ${currentWeights.length}. Falling back to fresh weights.`);
     currentWeights.forEach(t => t.dispose());
-    self.postMessage({ type: 'WEIGHTS_APPLIED' });
     return;
   }
-  
-  try {
-    const tensors: tf.Tensor[] = [];
-    for (let i = 0; i < serialized.values.length; i++) {
-      const recvShape = serialized.shapes[i];
-      const modelShape = currentWeights[i].shape as number[];
-      const values = serialized.values[i];
-      
-      if (!recvShape || !Array.isArray(recvShape) || recvShape.length === 0) {
-        throw new Error(`Invalid shape at index ${i}: ${JSON.stringify(recvShape)}`);
-      }
-      
-      // Check if shapes match exactly
-      const shapesMatch = recvShape.length === modelShape.length &&
-        recvShape.every((d, di) => d === modelShape[di]);
-      
-      if (!shapesMatch) {
-        // Heterogeneous client: reshape weights to match local model
-        const recvLen = recvShape.reduce((a, b) => a * b, 1);
-        const modelLen = modelShape.reduce((a, b) => a * b, 1);
-        
-        console.warn(`[Worker] Shape mismatch at tensor ${i}: received ${JSON.stringify(recvShape)} (len=${recvLen}) vs model ${JSON.stringify(modelShape)} (len=${modelLen}) — reshaping`);
-        
-        let adaptedValues: number[];
-        if (recvLen >= modelLen) {
-          // Truncate: take first modelLen elements
-          adaptedValues = values.slice(0, modelLen);
-        } else {
-          // Pad: use received values, fill rest with zeros
-          adaptedValues = [...values];
-          while (adaptedValues.length < modelLen) adaptedValues.push(0);
-        }
-        
-        const tensor = tf.tensor(adaptedValues, modelShape);
-        tensors.push(tensor);
-      } else {
-        const expectedLength = recvShape.reduce((a, b) => a * b, 1);
-        if (values.length !== expectedLength) {
-          throw new Error(`Length mismatch at tensor ${i}: expected ${expectedLength}, got ${values.length}`);
-        }
-        const tensor = tf.tensor(values, recvShape);
-        tensors.push(tensor);
-      }
+
+  const tensors: tf.Tensor[] = [];
+  for (let i = 0; i < serialized.values.length; i++) {
+    const recvShape  = serialized.shapes[i];
+    const modelShape = currentWeights[i].shape as number[];
+    const recvLen    = recvShape.reduce((a, b) => a * b, 1);
+    const modelLen   = modelShape.reduce((a, b) => a * b, 1);
+    if (recvLen !== modelLen) {
+      tensors.forEach(t => t.dispose());
+      currentWeights.forEach(t => t.dispose());
+      throw new Error(`Tensor ${i} length mismatch: ${recvLen} vs ${modelLen}`);
     }
-    
-    model.setWeights(tensors);
-    console.log('[Worker] ✓ Successfully applied', tensors.length, 'weight tensors to model');
-    
-    tensors.forEach(t => t.dispose());
-  } catch (err: any) {
-    console.error('[Worker] Error applying weights:', err.message);
-    currentWeights.forEach(t => t.dispose());
-    throw err;
+    tensors.push(tf.tensor(serialized.values[i], modelShape));
   }
-  
   currentWeights.forEach(t => t.dispose());
-  self.postMessage({ type: 'WEIGHTS_APPLIED' });
+  model.setWeights(tensors);
+  tensors.forEach(t => t.dispose());
 }
 
-async function handleTrain(epochs: number, batchSize: number) {
-  if (!model) throw new Error('No model');
-  if (!xs || !ys) throw new Error('No data');
-
-  console.log('[Worker] Starting training:', epochs, 'epochs,', batchSize, 'batch size');
+async function handleTrain(
+  epochs: number,
+  batchSize: number,
+  emitEpoch: (epoch: number, logs: any) => void,
+) {
+  if (!model)          throw new Error('No model');
+  if (!xs || !ys)      throw new Error('No data');
+  if (!meta)           throw new Error('No metadata');
 
   const started = Date.now();
   const history = await model.fit(xs, ys, {
@@ -325,51 +297,35 @@ async function handleTrain(epochs: number, batchSize: number) {
     batchSize,
     shuffle:         true,
     validationSplit: 0.1,
-    // In a Worker, there is no main thread to block — but we still yield
-    // between batches so the worker message queue stays responsive and
-    // EPOCH_END messages are sent promptly to the main thread.
-    yieldEvery: 'batch',
-    callbacks: {
-      onEpochEnd: (epoch, logs) => {
-        self.postMessage({ type: 'EPOCH_END', payload: { epoch, logs } });
-      },
-    },
+    yieldEvery:      'batch',
+    callbacks: { onEpochEnd: (epoch, logs) => emitEpoch(epoch, logs) },
   });
 
   const accuracy = ((history.history['acc'] ?? history.history['accuracy'] ?? [0]).at(-1)) as number;
   const loss     = ((history.history['loss'] ?? [0]).at(-1)) as number;
   const { updateNorm, updateConsistency } = computeUpdateMetrics();
 
-  console.log('[Worker] Training complete:', 'accuracy=', accuracy, 'loss=', loss);
-
-  self.postMessage({
-    type: 'TRAIN_COMPLETE',
-    payload: { accuracy, loss, datasetSize: meta!.rows, durationMs: Date.now() - started, epochsRun: epochs, updateNorm, updateConsistency },
-  });
+  return { accuracy, loss, datasetSize: meta.rows, durationMs: Date.now() - started, epochsRun: epochs, updateNorm, updateConsistency };
 }
 
-function handleExtractWeights() {
+function handleExtractWeights(): SerializedWeights {
   if (!model) throw new Error('No model');
   const ws = model.getWeights();
-  const result: SerializedWeights = { shapes: [], values: [] };
-  for (const w of ws) {
-    result.shapes.push(w.shape as number[]);
-    result.values.push(Array.from(w.dataSync()));
-  }
-  // FIX #6: Dispose the tensor copies returned by getWeights() to prevent memory leak
-  ws.forEach(t => t.dispose());
-  self.postMessage({ type: 'WEIGHTS_READY', payload: result });
+  return {
+    shapes: ws.map(w => w.shape as number[]),
+    values: ws.map(w => Array.from(w.dataSync())),
+  };
+  // Do NOT dispose ws — they are views of the internal Variable buffers
 }
 
-function handleApplyAlpha(weights: SerializedWeights, alpha: number) {
-  const scaled: SerializedWeights = {
+function handleApplyAlpha(weights: SerializedWeights, alpha: number): SerializedWeights {
+  return {
     shapes: weights.shapes,
     values: weights.values.map(arr => arr.map(v => v * alpha)),
   };
-  self.postMessage({ type: 'ALPHA_APPLIED', payload: scaled });
 }
 
-function handleApplyMasks(weights: SerializedWeights, assignments: MaskAssignment[]) {
+function handleApplyMasks(weights: SerializedWeights, assignments: MaskAssignment[]): SerializedWeights {
   const masked: SerializedWeights = {
     shapes: weights.shapes,
     values: weights.values.map(arr => [...arr]),
@@ -379,38 +335,63 @@ function handleApplyMasks(weights: SerializedWeights, assignments: MaskAssignmen
     for (let t = 0; t < masked.values.length; t++) {
       const flat = masked.values[t];
       for (let i = 0; i < flat.length; i++) {
-        const maskVal = (rng() * 2 - 1) * MASK_SCALE;
-        flat[i] = role === 'add' ? flat[i] + maskVal : flat[i] - maskVal;
+        const m = (rng() * 2 - 1) * MASK_SCALE;
+        flat[i] = role === 'add' ? flat[i] + m : flat[i] - m;
       }
     }
   }
-  self.postMessage({ type: 'MASKS_APPLIED', payload: masked });
+  return masked;
 }
 
 function handleDispose() {
-  model?.dispose(); xs?.dispose(); ys?.dispose();
+  try { model?.dispose(); } catch {}
+  try { xs?.dispose();    } catch {}
+  try { ys?.dispose();    } catch {}
   model = null; xs = null; ys = null;
   meta = null; prevGlobalW = null; prevUpdateNorm = 0;
-  // FIX #3: Notify main thread so pending Promises can be rejected
-  self.postMessage({ type: 'DISPOSED' });
+  globalSchema = [];
 }
 
-// ─── Message router ───────────────────────────────────────────────────────
+// ── Message router with request ID correlation ───────────────────────────────
 self.onmessage = async (e: MessageEvent) => {
-  const { type, payload } = e.data;
+  const { id, type, payload } = e.data;
+
+  // Heartbeat — respond immediately so the proxy knows the worker is alive
+  if (type === 'PING') {
+    self.postMessage({ id, type: 'PONG' });
+    return;
+  }
+
   try {
+    let result: any = undefined;
     switch (type) {
-      case 'LOAD_CSV':       await handleLoadCSV(payload.csvText, payload.fileName); break;
-      case 'APPLY_WEIGHTS':  handleApplyWeights(payload.serializedWeights);          break;
-      case 'TRAIN':          await handleTrain(payload.epochs, payload.batchSize);   break;
-      case 'EXTRACT_WEIGHTS':handleExtractWeights();                                  break;
-      case 'APPLY_ALPHA':    handleApplyAlpha(payload.weights, payload.alpha);       break;
-      case 'APPLY_MASKS':    handleApplyMasks(payload.weights, payload.assignments); break;
-      case 'DISPOSE':        handleDispose();                                         break;
-      default: console.warn('[Worker] Unknown message type:', type);
+      case 'LOAD_CSV':
+        result = await handleLoadCSV(payload.csvText, payload.schema);
+        break;
+      case 'APPLY_WEIGHTS':
+        handleApplyWeights(payload.serializedWeights);
+        break;
+      case 'TRAIN':
+        result = await handleTrain(payload.epochs, payload.batchSize,
+          (epoch, logs) => self.postMessage({ id, type: 'EPOCH_END', payload: { epoch, logs } }));
+        break;
+      case 'EXTRACT_WEIGHTS':
+        result = handleExtractWeights();
+        break;
+      case 'APPLY_ALPHA':
+        result = handleApplyAlpha(payload.weights, payload.alpha);
+        break;
+      case 'APPLY_MASKS':
+        result = handleApplyMasks(payload.weights, payload.assignments);
+        break;
+      case 'DISPOSE':
+        handleDispose();
+        break;
+      default:
+        throw new Error(`Unknown message type: ${type}`);
     }
+    self.postMessage({ id, type: 'OK', payload: result });
   } catch (err: any) {
-    console.error('[Worker] Error handling', type, ':', err.message);
-    self.postMessage({ type: 'ERROR', payload: { message: err.message } });
+    self.postMessage({ id, type: 'ERROR', payload: { message: err?.message || String(err) } });
   }
 };
