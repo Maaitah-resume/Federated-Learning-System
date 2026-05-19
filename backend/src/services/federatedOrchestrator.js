@@ -181,6 +181,7 @@ let adaptiveWeightsNext  = {};   // α for the upcoming round
 let metaAggregator       = null;
 const pendingSubmissions = new Map();
 let roundResolve         = null;
+let isStartingJob        = false;
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 // FIX: delegate entirely to SystemConfig.getConfig() which already handles
@@ -272,48 +273,60 @@ function getMasksForNode(companyId) {
 // roomId parameter added so the job record carries the originating room;
 // used for logging and future per-room queries.
 async function startJob(participantIds, roomId) {
-  if (activeJob) { console.log('[FedOrch] Job already running'); return activeJob; }
+  if (activeJob)    { console.log('[FedOrch] Job already running'); return activeJob; }
+  if (isStartingJob) { console.log('[FedOrch] Job already starting'); return activeJob; }
 
-  const jobId       = `job-${uuidv4().slice(0, 8)}`;
-  const totalRounds = await getTotalRounds();
+  isStartingJob = true;
+  try {
+    // Double-check after any potential async gap
+    if (activeJob) { console.log('[FedOrch] Job already running (double-check)'); return activeJob; }
 
-  console.log(
-    `[FedOrch] Starting job ${jobId} | rounds=${totalRounds} | room=${roomId || 'legacy'} | ` +
-    `nodes=[${participantIds.join(', ')}]`
-  );
+    const jobId       = `job-${uuidv4().slice(0, 8)}`;
+    const totalRounds = await getTotalRounds();
 
-  activeJob = {
-    jobId,
-    status: 'INITIALIZING',
-    participantIds,
-    totalRounds,
-    currentRound:   0,
-    startedAt:      new Date(),
-    adaptiveWeights: null,
-    roomId:         roomId || null,
-  };
-  globalWeights      = null;
-  metaAggregator     = new AdaptiveMetaAggregator();
-  pendingSubmissions.clear();
-  roundSeeds.clear();
+    // Another double-check after the async getConfig call
+    if (activeJob) { console.log('[FedOrch] Job already running (post-config check)'); return activeJob; }
 
-  // Round 1: uniform weights (1/N) — no quality signal yet
-  const uniformAlpha = 1 / participantIds.length;
-  adaptiveWeightsNext = Object.fromEntries(participantIds.map(id => [id, uniformAlpha]));
-
-  for (const companyId of participantIds) {
-    await Participant.findOneAndUpdate(
-      { companyId, status: PARTICIPANT_STATUS.QUEUED },
-      { $set: { status: PARTICIPANT_STATUS.TRAINING, jobId } }
+    console.log(
+      `[FedOrch] Starting job ${jobId} | rounds=${totalRounds} | room=${roomId || 'legacy'} | ` +
+      `nodes=[${participantIds.join(', ')}]`
     );
-  }
 
-  emitter.emit(WS_EVENTS.TRAINING_STARTING, { jobId, totalRounds, participants: participantIds });
-  runRounds(jobId, participantIds, totalRounds).catch(err => {
-    console.error(`[FedOrch] Job ${jobId} crashed:`, err.message);
-    activeJob = null;
-  });
-  return activeJob;
+    activeJob = {
+      jobId,
+      status: 'INITIALIZING',
+      participantIds,
+      totalRounds,
+      currentRound:   0,
+      startedAt:      new Date(),
+      adaptiveWeights: null,
+      roomId:         roomId || null,
+    };
+    globalWeights      = null;
+    metaAggregator     = new AdaptiveMetaAggregator();
+    pendingSubmissions.clear();
+    roundSeeds.clear();
+
+    // Round 1: uniform weights (1/N) — no quality signal yet
+    const uniformAlpha = 1 / participantIds.length;
+    adaptiveWeightsNext = Object.fromEntries(participantIds.map(id => [id, uniformAlpha]));
+
+    for (const companyId of participantIds) {
+      await Participant.findOneAndUpdate(
+        { companyId, status: PARTICIPANT_STATUS.QUEUED },
+        { $set: { status: PARTICIPANT_STATUS.TRAINING, jobId } }
+      );
+    }
+
+    emitter.emit(WS_EVENTS.TRAINING_STARTING, { jobId, totalRounds, participants: participantIds });
+    runRounds(jobId, participantIds, totalRounds).catch(err => {
+      console.error(`[FedOrch] Job ${jobId} crashed:`, err.message);
+      activeJob = null;
+    });
+    return activeJob;
+  } finally {
+    isStartingJob = false;
+  }
 }
 
 async function runRounds(jobId, participantIds, totalRounds) {

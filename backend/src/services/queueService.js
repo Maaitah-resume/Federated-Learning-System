@@ -145,31 +145,38 @@ async function getQueueState(requestingCompanyId) {
  * This prevents users in different rooms from polluting each other's sessions.
  */
 async function checkAndStart() {
-  if (isStartingJob)        return;
+  if (isStartingJob)          return;
   if (fedOrch.getActiveJob()) return;
 
-  const minClients = await getMinClients();
-
-  // Find rooms that have reached the threshold
-  const readyRooms = await Participant.aggregate([
-    { $match: { status: PARTICIPANT_STATUS.QUEUED, jobId: null, roomId: { $ne: null } } },
-    { $group: { _id: '$roomId', count: { $sum: 1 } } },
-    { $match: { count: { $gte: minClients } } },
-    { $limit: 1 },
-  ]);
-
-  if (readyRooms.length === 0) {
-    // Count total queued just for the log message
-    const total = await Participant.countDocuments({ status: PARTICIPANT_STATUS.QUEUED, jobId: null });
-    console.log(`[Queue] No room ready (${total} total queued, need ${minClients} in one room)`);
-    return;
-  }
-
-  const roomId = readyRooms[0]._id;
+  // Set the lock BEFORE any async operation to prevent the race condition
+  // where two concurrent calls both pass the guard, both query the DB,
+  // both find the room ready, and both start separate jobs (duplicates).
   isStartingJob = true;
-  console.log(`[Queue] Room ${roomId} reached threshold (${readyRooms[0].count}/${minClients}) — starting job`);
 
   try {
+    const minClients = await getMinClients();
+
+    // Double-check after the async getConfig call — another call may have
+    // started a job while we were waiting.
+    if (fedOrch.getActiveJob()) return;
+
+    // Find rooms that have reached the threshold
+    const readyRooms = await Participant.aggregate([
+      { $match: { status: PARTICIPANT_STATUS.QUEUED, jobId: null, roomId: { $ne: null } } },
+      { $group: { _id: '$roomId', count: { $sum: 1 } } },
+      { $match: { count: { $gte: minClients } } },
+      { $limit: 1 },
+    ]);
+
+    if (readyRooms.length === 0) {
+      const total = await Participant.countDocuments({ status: PARTICIPANT_STATUS.QUEUED, jobId: null });
+      console.log(`[Queue] No room ready (${total} total queued, need ${minClients} in one room)`);
+      return;
+    }
+
+    const roomId = readyRooms[0]._id;
+    console.log(`[Queue] Room ${roomId} reached threshold (${readyRooms[0].count}/${minClients}) — starting job`);
+
     const participants   = await Participant.find({
       roomId,
       status: PARTICIPANT_STATUS.QUEUED,
