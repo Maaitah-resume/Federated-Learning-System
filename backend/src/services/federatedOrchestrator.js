@@ -272,6 +272,28 @@ function getMasksForNode(companyId) {
 // ─── Job lifecycle ────────────────────────────────────────────────────────────
 // roomId parameter added so the job record carries the originating room;
 // used for logging and future per-room queries.
+
+// ── Canonical global label schema ────────────────────────────────────────────
+// All clients in any federation use this exact schema for their output layer.
+// Local labels not in this list map to the OTHER bucket. This guarantees
+// every client builds an identical model architecture (same output dim) so
+// weight aggregation is mathematically valid regardless of which subset of
+// these labels appears in a given client's local CSV.
+const GLOBAL_LABEL_SCHEMA = [
+  'Benign',
+  'DoS attacks-Hulk',
+  'DoS attacks-SlowHTTPTest',
+  'DDoS',
+  'PortScan',
+  'FTP-BruteForce',
+  'SSH-Bruteforce',
+  'Bot',
+  'Infiltration',
+  'OTHER',
+];
+
+function getGlobalSchema() { return GLOBAL_LABEL_SCHEMA.slice(); }
+
 async function startJob(participantIds, roomId) {
   if (activeJob)    { console.log('[FedOrch] Job already running'); return activeJob; }
   if (isStartingJob) { console.log('[FedOrch] Job already starting'); return activeJob; }
@@ -514,4 +536,4 @@ function hasSubmittedForRound(companyId) {
   return pendingSubmissions.has(companyId);
 }
 
-module.exports = { startJob, getActiveJob, getGlobalWeights, getMasksForNode, submitWeights, hasSubmittedForRound };
+module.exports = { startJob, getActiveJob, getGlobalWeights, getMasksForNode, submitWeights, hasSubmittedForRound, getGlobalSchema };
