@@ -232,59 +232,76 @@ function handleApplyWeights(serialized: SerializedWeights) {
   
   console.log('[Worker] handleApplyWeights: applying', serialized.values.length, 'weight tensors');
   
-  // Validate shapes match
   if (serialized.values.length === 0) {
     throw new Error('Received empty weights array');
   }
   
   prevGlobalW = serialized;
   
-  // Safely dispose old model
   try {
     model?.dispose();
   } catch (e) {
     console.warn('[Worker] Error disposing old model:', e);
   }
   
-  // Build fresh model
   model = buildModelFromMeta(meta);
   
-  // Get current weights to validate count
   const currentWeights = model.getWeights();
   if (serialized.values.length !== currentWeights.length) {
-    console.warn('[Worker] Shape mismatch: received', serialized.values.length, 
+    console.warn('[Worker] Tensor count mismatch: received', serialized.values.length, 
                  'tensors but model has', currentWeights.length, '— using fresh weights');
     currentWeights.forEach(t => t.dispose());
     self.postMessage({ type: 'WEIGHTS_APPLIED' });
     return;
   }
   
-  // Apply weights with shape validation
   try {
     const tensors: tf.Tensor[] = [];
     for (let i = 0; i < serialized.values.length; i++) {
-      const shape = serialized.shapes[i];
+      const recvShape = serialized.shapes[i];
+      const modelShape = currentWeights[i].shape as number[];
       const values = serialized.values[i];
       
-      if (!shape || !Array.isArray(shape) || shape.length === 0) {
-        throw new Error(`Invalid shape at index ${i}: ${JSON.stringify(shape)}`);
+      if (!recvShape || !Array.isArray(recvShape) || recvShape.length === 0) {
+        throw new Error(`Invalid shape at index ${i}: ${JSON.stringify(recvShape)}`);
       }
       
-      // Verify shape matches flattened values length
-      const expectedLength = shape.reduce((a, b) => a * b, 1);
-      if (values.length !== expectedLength) {
-        throw new Error(`Length mismatch at tensor ${i}: expected ${expectedLength}, got ${values.length}`);
-      }
+      // Check if shapes match exactly
+      const shapesMatch = recvShape.length === modelShape.length &&
+        recvShape.every((d, di) => d === modelShape[di]);
       
-      const tensor = tf.tensor(values, shape);
-      tensors.push(tensor);
+      if (!shapesMatch) {
+        // Heterogeneous client: reshape weights to match local model
+        const recvLen = recvShape.reduce((a, b) => a * b, 1);
+        const modelLen = modelShape.reduce((a, b) => a * b, 1);
+        
+        console.warn(`[Worker] Shape mismatch at tensor ${i}: received ${JSON.stringify(recvShape)} (len=${recvLen}) vs model ${JSON.stringify(modelShape)} (len=${modelLen}) — reshaping`);
+        
+        let adaptedValues: number[];
+        if (recvLen >= modelLen) {
+          // Truncate: take first modelLen elements
+          adaptedValues = values.slice(0, modelLen);
+        } else {
+          // Pad: use received values, fill rest with zeros
+          adaptedValues = [...values];
+          while (adaptedValues.length < modelLen) adaptedValues.push(0);
+        }
+        
+        const tensor = tf.tensor(adaptedValues, modelShape);
+        tensors.push(tensor);
+      } else {
+        const expectedLength = recvShape.reduce((a, b) => a * b, 1);
+        if (values.length !== expectedLength) {
+          throw new Error(`Length mismatch at tensor ${i}: expected ${expectedLength}, got ${values.length}`);
+        }
+        const tensor = tf.tensor(values, recvShape);
+        tensors.push(tensor);
+      }
     }
     
-    // Set weights on the model
     model.setWeights(tensors);
     console.log('[Worker] ✓ Successfully applied', tensors.length, 'weight tensors to model');
     
-    // Cleanup
     tensors.forEach(t => t.dispose());
   } catch (err: any) {
     console.error('[Worker] Error applying weights:', err.message);

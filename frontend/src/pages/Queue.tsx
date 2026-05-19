@@ -149,6 +149,7 @@ export default function Queue() {
       }
     } catch (err:any) {
       console.error('[Queue] Round error:', err);
+      console.error('[Queue] Round error stack:', err?.stack);
       setStatus(s=>({...s,phase:'idle',message:`Error: ${err.message}`}));
       // FIX BUG 2: do NOT set pendingRoundRef here.
       // Setting it would cause finally → setTimeout(runLocalRound,0) → same
@@ -158,7 +159,7 @@ export default function Queue() {
     } finally {
       isTrainingRef.current = false;
       currentlyTrainingRoundRef.current = 0;
-      if (pendingRoundRef.current && inQueueRef.current) {
+      if (pendingRoundRef.current && (inQueueRef.current || activeJobIdRef.current)) {
         const next = pendingRoundRef.current;
         pendingRoundRef.current = null;
         if (next.round > lastSubmittedRoundRef.current) {
