@@ -11,9 +11,9 @@ const errorHandler                 = require('./middleware/errorHandler');
 // ── Route modules ─────────────────────────────────────────────────────────────
 const authRoutes      = require('./routes/auth.routes');
 const queueRoutes     = require('./routes/queue.routes');
-const dataRoutes      = require('./routes/data.routes');
+
 const metricsRoutes   = require('./routes/metrics.routes');
-const trainingRoutes  = require('./routes/training.routes');
+
 const modelRoutes     = require('./routes/model.routes');
 const healthRoutes    = require('./routes/health.routes');
 const adminRoutes     = require('./routes/admin.routes');
@@ -38,9 +38,9 @@ app.use(express.static(frontendDist));
 app.use('/health',          healthRoutes);
 app.use('/api/auth',        loginLimiter,  authRoutes);
 app.use('/api/queue',       apiLimiter,    queueRoutes);
-app.use('/api/data',        apiLimiter,    dataRoutes);
+
 app.use('/api/metrics',     apiLimiter,    metricsRoutes);
-app.use('/api/training',    apiLimiter,    trainingRoutes);
+
 app.use('/api/models',      apiLimiter,    modelRoutes);
 app.use('/api/admin',       apiLimiter,    adminRoutes);
 app.use('/api/federated',   apiLimiter,    federatedRoutes); // ← NEW
