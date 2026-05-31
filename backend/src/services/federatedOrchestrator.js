@@ -325,7 +325,8 @@ async function startJob(participantIds, roomId) {
       roomId:         roomId || null,
     };
     globalWeights      = null;
-    metaAggregator     = new AdaptiveMetaAggregator();
+    const configLR     = await getConfig('LEARNING_RATE');
+    metaAggregator     = new AdaptiveMetaAggregator(configLR ?? 0.05);
     pendingSubmissions.clear();
     roundSeeds.clear();
 
