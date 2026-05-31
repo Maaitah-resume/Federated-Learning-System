@@ -157,7 +157,7 @@ export default function AdminDashboard() {
                 : 'text-slate-500 hover:text-slate-700'
             }`}
           >
-            {tab === 'config' ? '⚙️ Training Config' : '👥 Manage Users'}
+            {tab === 'config' ? 'Training Config' : 'Manage Users'}
           </button>
         ))}
       </div>
