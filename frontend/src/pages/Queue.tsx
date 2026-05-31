@@ -62,7 +62,7 @@ export default function Queue() {
     if (!localTrainer.isReady) {
       console.log('[Queue] Model not ready — queuing round', event.round);
       pendingRoundRef.current = event;
-      setStatus(s=>({...s,phase:'loading',message:`⚡ Round ${event.round} started — load your CSV NOW!`}));
+      setStatus(s=>({...s,phase:'loading',message:`Round ${event.round} started — load your CSV NOW!`}));
       return;
     }
 
@@ -137,7 +137,7 @@ export default function Queue() {
   //
   // Why this is the definitive fix for "works for N rounds then stops":
   //  - Socket event fires → handler runs → some guard returns early → no training
-  //  - 5 s later: poll detects round N > lastSubmitted → triggers training ✓
+  //  - 5 s later: poll detects round N > lastSubmitted -> triggers training [ok]
   //  - No infinite loops: poll checks isTrainingRef before acting
   useEffect(() => {
     const poll = setInterval(async () => {
@@ -243,7 +243,7 @@ export default function Queue() {
       setSubmissions(null);
     };
     const onComplete = () => {
-      setStatus({phase:'done',round:0,epoch:0,totalEpochs:3,accuracy:null,loss:null,message:'🎉 Training complete!'});
+      setStatus({phase:'done',round:0,epoch:0,totalEpochs:3,accuracy:null,loss:null,message:'Training complete!'});
       pendingRoundRef.current       = null;
       isTrainingRef.current         = false;
       lastSubmittedRoundRef.current = 0;
@@ -366,7 +366,7 @@ export default function Queue() {
             className="bg-red-50 border-2 border-red-400 rounded-2xl p-4 flex items-start gap-3">
             <AlertTriangle className="text-red-500 mt-0.5 shrink-0" size={24}/>
             <div>
-              <p className="font-bold text-red-700 text-lg">⚡ Round {pendingRoundRef.current?.round} is waiting!</p>
+              <p className="font-bold text-red-700 text-lg">Round {pendingRoundRef.current?.round} is waiting!</p>
               <p className="text-red-600 text-sm mt-1"><strong>Load your CSV NOW</strong> to participate before the round times out.</p>
             </div>
           </motion.div>
@@ -379,7 +379,7 @@ export default function Queue() {
             <div className="flex items-center gap-4 mb-4">
               <div className="w-12 h-12 bg-white/20 rounded-2xl flex items-center justify-center"><Zap size={24} className="animate-pulse"/></div>
               <div className="flex-1">
-                <h3 className="font-bold text-lg">🔐 Pairwise-Masked Federated Training</h3>
+                <h3 className="font-bold text-lg">Pairwise-Masked Federated Training</h3>
                 <p className="text-sm text-white/80">Job <span className="font-mono">{activeJob.jobId.slice(0,8)}</span> · <span className="font-bold uppercase">{activeJob.status}</span></p>
               </div>
               <div className="text-right">
@@ -421,7 +421,7 @@ export default function Queue() {
               ):file?(
                 <div className="space-y-2">
                   {dataReady&&<div className="flex items-center justify-center gap-2 text-emerald-700 bg-emerald-50 rounded-xl px-3 py-1.5 text-xs font-semibold"><CheckCircle2 size={13}/> Ready — stays local</div>}
-                  {parseError&&<div className="text-red-500 bg-red-50 rounded-xl px-3 py-2 text-xs">⚠ {parseError}</div>}
+                  {parseError&&<div className="text-red-500 bg-red-50 rounded-xl px-3 py-2 text-xs">{parseError}</div>}
                   <div className="flex items-center justify-between bg-indigo-50 rounded-xl px-4 py-3">
                     <div className="flex items-center gap-2 text-indigo-700">
                       <FileText size={18}/>
@@ -436,7 +436,7 @@ export default function Queue() {
               ):(
                 <>
                   <Upload size={28} className={`mx-auto mb-2 ${hasPendingRound?'text-red-400':'text-slate-300'}`}/>
-                  <p className={`text-sm font-medium ${hasPendingRound?'text-red-600':'text-slate-500'}`}>{hasPendingRound?'⚡ Drop CSV NOW!':'Drop your CSV here'}</p>
+                  <p className={`text-sm font-medium ${hasPendingRound?'text-red-600':'text-slate-500'}`}>{hasPendingRound?'Drop CSV NOW!':'Drop your CSV here'}</p>
                   <p className="text-xs text-slate-400 mt-1">Parsed in browser — never uploaded</p>
                 </>
               )}
@@ -506,7 +506,7 @@ export default function Queue() {
                       className={`w-full py-4 rounded-2xl font-bold text-lg transition-all
                         ${dataReady?'bg-indigo-600 text-white shadow-xl shadow-indigo-100 hover:bg-indigo-700 cursor-pointer':'bg-slate-200 text-slate-400 cursor-not-allowed'}`}>
                       {joining?<span className="flex items-center justify-center gap-2"><Loader2 className="animate-spin" size={20}/> Joining...</span>
-                        :dataReady?'Join Waiting Room':'🔒 Load CSV First'}
+                        :dataReady?'Join Waiting Room':'Load CSV First'}
                     </motion.button>
                   ):(
                     <motion.div key="waiting" initial={{opacity:0,y:10}} animate={{opacity:1,y:0}} exit={{opacity:0,y:-10}} className="space-y-3">
